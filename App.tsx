@@ -5,10 +5,11 @@ import { AlignedSegment } from './services/gemini';
 import { alignScriptDeterministic } from './services/matcher';
 import { transcribeWithAssembly } from './services/assemblyBackend';
 import { sliceAudioBuffer, decodeAudio } from './services/audioProcessor';
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { LiquidCard, LiquidButton, LiquidTextArea, LiquidDropZone, LiquidProgressBar } from './components/LiquidUI';
+import { AudioTimeline } from './components/AudioTimeline';
 // @ts-ignore
-import { ArrowDownTrayIcon, PlayIcon, PauseIcon } from '@heroicons/react/24/solid';
+import { ArrowDownTrayIcon, PlayIcon, PauseIcon, AdjustmentsHorizontalIcon } from '@heroicons/react/24/solid';
 
 interface ProcessingState {
   status: 'idle' | 'transcribing' | 'aligning' | 'slicing' | 'completed' | 'error';
@@ -34,6 +35,7 @@ function App() {
   const [segments, setSegments] = useState<FinalSegment[]>([]);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [showTimeline, setShowTimeline] = useState(false);
   // Playback Progress State
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -148,7 +150,30 @@ function App() {
 
     } catch (error: any) {
       console.error(error);
-      setProcState({ status: 'error', progress: 0, message: error.message || "An unexpected error occurred" });
+    }
+  };
+
+  const updateSegmentsPrecision = async (newSegments: AlignedSegment[]) => {
+    if (!audioFile) return;
+    const tempSegments = newSegments.map(s => {
+      const existing = segments.find(old => old.title === s.title);
+      return { ...s, blobUrl: existing?.blobUrl || '', duration: s.end_time - s.start_time } as FinalSegment;
+    });
+    setSegments(tempSegments);
+    try {
+      const decodedBuffer = await decodeAudio(audioFile);
+      const reProcessed: FinalSegment[] = [];
+      for (const segment of newSegments) {
+        let startTime = Math.max(0, segment.start_time);
+        let endTime = Math.min(decodedBuffer.duration, segment.end_time);
+        if (endTime > startTime) {
+          const sliceBlob = await sliceAudioBuffer(decodedBuffer, startTime, endTime);
+          reProcessed.push({ ...segment, blobUrl: URL.createObjectURL(sliceBlob), duration: endTime - startTime });
+        }
+      }
+      setSegments(reProcessed);
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -328,9 +353,18 @@ function App() {
             className="min-h-[600px]"
             rightElement={
               segments.length > 0 && (
-                <span className="bg-white/10 px-3 py-1 rounded-full text-xs font-medium text-gray-300">
-                  {segments.length} SEGMENTS
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowTimeline(true)}
+                    className="flex items-center gap-2 bg-[#FF0055]/10 hover:bg-[#FF0055]/20 text-[#FF0055] px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all border border-[#FF0055]/20 active:scale-95"
+                  >
+                    <AdjustmentsHorizontalIcon className="w-3 h-3" />
+                    Manual Precision Cut
+                  </button>
+                  <span className="bg-white/10 px-3 py-1.5 rounded-full text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                    {segments.length} Segments
+                  </span>
+                </div>
               )
             }
           >
@@ -424,6 +458,17 @@ function App() {
         </div>
 
       </div>
+
+      {/* Full Screen Modal Timeline */}
+      {showTimeline && audioFile && segments.length > 0 && (
+        <AudioTimeline
+          audioFile={audioFile}
+          segments={segments}
+          onSegmentsUpdate={updateSegmentsPrecision}
+          onClose={() => setShowTimeline(false)}
+          onDownloadAll={downloadAllSegments}
+        />
+      )}
     </div>
   );
 

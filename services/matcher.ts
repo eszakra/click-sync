@@ -5,11 +5,14 @@ import { AlignedSegment } from './gemini';
 // --- HELPER: String Similarity (Dice Coefficient / Bigram) ---
 // Good for catching typos or small differences (e.g. "colour" vs "color")
 function getSimilarity(s1: string, s2: string): number {
-    s1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
-    s2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
+    // Basic cleaning for comparison - preserve alphanumeric
+    s1 = s1.toLowerCase().replace(/[^a-z0-9ñ]/g, '');
+    s2 = s2.toLowerCase().replace(/[^a-z0-9ñ]/g, '');
 
     if (s1 === s2) return 1.0;
-    if (s1.length < 2 || s2.length < 2) return 0.0;
+    if (s1.length < 2 || s2.length < 2) {
+        return s1 === s2 ? 1.0 : 0.0;
+    }
 
     const bigrams1 = new Set<string>();
     for (let i = 0; i < s1.length - 1; i++) bigrams1.add(s1.substring(i, i + 2));
@@ -24,7 +27,13 @@ function getSimilarity(s1: string, s2: string): number {
 }
 
 // --- NORMALIZATION ---
-const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+// Improved: Normalizes Spanish characters (accents) and preserves 'ñ'
+const normalize = (text: string) =>
+    text.toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "") // Remove accents (á -> a)
+        .replace(/[^a-z0-9ñ\s]/g, '')    // Keep alphanumeric, ñ and spaces
+        .trim();
 
 export const alignScriptDeterministic = async (
     scriptText: string,
@@ -41,7 +50,8 @@ export const alignScriptDeterministic = async (
     // Regex to find all [ON SCREEN: ...] markers
     // Capture group 1 is the Title inside the brackets.
     // We use 'g' for global and 'i' for case-insensitive.
-    const markerRegex = /\[ON SCREEN:\s*(.*?)\]/gi;
+    // IMPROVED: Now handles [ON SCREEN:, ÑON SCREEN:, ñon screen:, variations without brackets, etc.
+    const markerRegex = /(?:\[|Ñ|ñ|¿)?\s*(?:ON|ÑON|on|ñon)\s*SCREEN[:\s-]*([^\]\n\r]*?)(?:\]|\n|\r|$)/gi;
 
     let match;
     let lastIndex = 0;
@@ -81,20 +91,20 @@ export const alignScriptDeterministic = async (
         if (segWords.length === 0) continue;
 
         // -- FIND START --
-        // Use a 5-word fingerprint. If that fails, try 3.
         let bestStartMatch = { index: -1, score: 0 };
-        const startWindowSize = 5;
-        const startTarget = segWords.slice(0, startWindowSize).join('');
+        // Use a variable window size for shorter segments
+        const actualStartWindow = Math.min(5, segWords.length);
+        const startTarget = segWords.slice(0, actualStartWindow).join('');
 
         // Scan ahead. We limit the scan to avoid overlapping too far into future segments,
         // but for safety, let's scan a good chunk (e.g., next 1000 words or until end).
         // Optimization: Stop if we find a near-perfect match.
         const maxScan = 2000;
 
-        for (let i = searchIndex; i < Math.min(words.length - startWindowSize, searchIndex + maxScan); i++) {
+        for (let i = searchIndex; i <= Math.min(words.length - actualStartWindow, searchIndex + maxScan); i++) {
             // Construct candidate string from transcript words
             let candidate = "";
-            for (let j = 0; j < startWindowSize; j++) candidate += normalize(words[i + j].text);
+            for (let j = 0; j < actualStartWindow; j++) candidate += normalize(words[i + j].text);
 
             const score = getSimilarity(startTarget, candidate);
 
@@ -136,25 +146,22 @@ export const alignScriptDeterministic = async (
         // -- FIND END --
         // Similar logic, but looking for the last words of the segment.
         let bestEndMatch = { index: -1, score: 0 };
-        const endWindowSize = 5;
-        const endTarget = segWords.slice(-endWindowSize).join('');
+        const actualEndWindow = Math.min(5, segWords.length);
+        const endTarget = segWords.slice(-actualEndWindow).join('');
 
         // We scan from startIndex. 
-        // IMPORTANT: We should ideally stop at the START of the *next* segment if known.
-        // But we don't know it yet.
-
-        for (let i = searchIndex; i < Math.min(words.length - endWindowSize, searchIndex + 5000); i++) {
+        for (let i = searchIndex; i <= Math.min(words.length - actualEndWindow, searchIndex + 5000); i++) {
             let candidate = "";
-            for (let j = 0; j < endWindowSize; j++) candidate += normalize(words[i + j].text);
+            for (let j = 0; j < actualEndWindow; j++) candidate += normalize(words[i + j].text);
 
             const score = getSimilarity(endTarget, candidate);
 
             if (score > 0.85) {
-                bestEndMatch = { index: i + endWindowSize - 1, score }; // Point to last word
+                bestEndMatch = { index: i + actualEndWindow - 1, score }; // Point to last word
                 break;
             }
             if (score > bestEndMatch.score) {
-                bestEndMatch = { index: i + endWindowSize - 1, score };
+                bestEndMatch = { index: i + actualEndWindow - 1, score };
             }
         }
 
@@ -183,40 +190,32 @@ export const alignScriptDeterministic = async (
         }
     }
 
-    // 3. Post-Processing: Fix Gaps & Overlaps + Add Padding
+    // 3. Post-Processing: Fix Gaps & Overlaps - Ensure PERFECT CONTINUITY
     for (let i = 0; i < result.length; i++) {
         const seg = result[i];
 
-        // ADD PADDING (Crucial for natural sound)
-        // Start: Move back 0.15s to catch breath/attack
-        seg.start_time = Math.max(0, seg.start_time - 0.15);
+        // NO PADDING allowed as per user request
+        // Start and End are kept as detected by word timestamps initially
 
-        // SPECIAL CASE: First segment almost always starts at 0 physically
-        // If the calculated start is within the first 2 seconds, snap it to 0.
-        if (i === 0 && seg.start_time < 2.0) {
+        // SPECIAL CASE: First segment starts exactly at 0
+        if (i === 0) {
             seg.start_time = 0;
         }
 
-        // End: Move forward 0.15s for decay
-        seg.end_time = seg.end_time + 0.15;
-
-        // Fix Overlaps with next segment
+        // Bridge gaps to make segments contiguous
         if (i < result.length - 1) {
-            const nextStart = result[i + 1].start_time;
-            // If padded end overlaps next start (with its padding), we have to compromise.
-            // We want next segment to have its pre-padding too.
-            // Let's set boundary at the midpoint of the "overlap" if possible, 
-            // BUT prioritize the Start of the next segment usually.
+            const nextSeg = result[i + 1];
 
-            // Simple logic: Don't let current end go past next start minus a tiny gap
-            if (seg.end_time > nextStart - 0.05) {
-                seg.end_time = nextStart - 0.05;
-            }
+            // The boundary for contiguous segments is the start of the next one
+            // However, we want to ensure the detection of the next seg is reliable
+            // We set the current segment's end to the next segment's start
+            seg.end_time = nextSeg.start_time;
         }
     }
 
-    // Explicitly fix the LAST segment to go to the very end of audio/transcript
+    // Explicitly fix the LAST segment to go to the very end of audio
     if (result.length > 0) {
+        // We'll use the last word's end, but App.tsx will clip it to buffer duration anyway
         result[result.length - 1].end_time = words[words.length - 1].end / 1000;
     }
 
