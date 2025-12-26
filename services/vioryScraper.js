@@ -91,12 +91,16 @@ class VioryScraper {
 
 // Singleton instance
 let scraperInstance = null;
-
-export async function searchVioryVideos(query, maxResults = 30) {
+export async function getVioryScraper() {
     if (!scraperInstance) {
         scraperInstance = new VioryScraper();
     }
-    return await scraperInstance.searchVideos(query, maxResults);
+    return scraperInstance;
+}
+
+export async function searchVioryVideos(query, maxResults = 30) {
+    const scraper = await getVioryScraper();
+    return await scraper.searchVideos(query, maxResults);
 }
 
 export async function closeScraper() {

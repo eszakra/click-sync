@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { getVioryScraper } from './vioryScraper.js';
 
 // API Key
-const GEMINI_API_KEY = "AIzaSyCp9B_OTNMBfRmE26o7zKFUzr4d1rnrQPU";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyCp9B_OTNMBfRmE26o7zKFUzr4d1rnrQPU";
 
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
