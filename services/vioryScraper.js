@@ -8,21 +8,16 @@ class VioryScraper {
 
     async init() {
         if (!this.browser) {
-            const browserlessToken = process.env.BROWSERLESS_API_KEY;
-
-            if (browserlessToken) {
-                console.log('[VioryScraper] Connecting to Browserless.io...');
-                this.browser = await chromium.connectOverCDP(
-                    `wss://chrome.browserless.io?token=${browserlessToken}&--no-sandbox&--disable-setuid-sandbox`
-                );
-            } else {
-                console.log('[VioryScraper] No BROWSERLESS_API_KEY, launching local chromium...');
-                this.browser = await chromium.launch({
-                    headless: true,
-                    args: ['--no-sandbox', '--disable-setuid-sandbox']
-                });
-            }
-
+            this.browser = await chromium.launch({
+                headless: true,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage', // Critical for Docker to avoid memory crashes
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu'
+                ]
+            });
             this.context = await this.browser.newContext({
                 userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             });
@@ -102,16 +97,12 @@ class VioryScraper {
 
 // Singleton instance
 let scraperInstance = null;
-export async function getVioryScraper() {
+
+export async function searchVioryVideos(query, maxResults = 30) {
     if (!scraperInstance) {
         scraperInstance = new VioryScraper();
     }
-    return scraperInstance;
-}
-
-export async function searchVioryVideos(query, maxResults = 30) {
-    const scraper = await getVioryScraper();
-    return await scraper.searchVideos(query, maxResults);
+    return await scraperInstance.searchVideos(query, maxResults);
 }
 
 export async function closeScraper() {

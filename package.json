@@ -30,11 +30,8 @@
     "wavesurfer.js": "^7.12.1"
   },
   "devDependencies": {
-    "@types/formidable": "^3.4.5",
     "@types/node": "^22.14.0",
-    "@vercel/node": "^5.1.0",
     "@vitejs/plugin-react": "^5.0.0",
-    "formidable": "^3.5.2",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }

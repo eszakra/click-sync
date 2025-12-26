@@ -1,6 +1,6 @@
 import { supabase } from './supabaseClient';
 
-const API_URL = "/api/transcribe";
+const API_URL = "http://localhost:5000";
 
 export interface AssemblyWord {
     text: string;
@@ -70,7 +70,7 @@ export const transcribeWithAssembly = async (file: File): Promise<AssemblyRespon
     const formData = new FormData();
     formData.append('audio', file);
 
-    const response = await fetch('/api/transcribe', {
+    const response = await fetch(`${API_URL}/transcribe`, {
         method: 'POST',
         body: formData,
     });

@@ -12,7 +12,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = 5000;
 
 // Setup basic middleware
 app.use(cors());
@@ -24,10 +24,10 @@ const upload = multer({ dest: 'uploads/' });
 // Initialize AssemblyAI
 // In a real app, use .env. For this local tool, we use the provided key directly.
 const client = new AssemblyAI({
-    apiKey: process.env.ASSEMBLYAI_API_KEY || "5ff41fbb9f314b57b4f8036534243b6b"
+    apiKey: "5ff41fbb9f314b57b4f8036534243b6b"
 });
 
-app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
+app.post('/transcribe', upload.single('audio'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No audio file uploaded' });
     }
