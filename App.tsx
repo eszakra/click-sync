@@ -413,11 +413,34 @@ function App() {
                 // I will add a special call for context on the first iteration.
 
                 if (!contextFetched) {
-                    // Fetch context from API
-                    fetch('/api/video-matching', {
+                    // Quick separate call for context (using the research endpoint? No, that's block specific)
+                    // I will mock a call to `/api/video-matching` but that runs the whole batch.
+                    // I will just add a 'context-only' mode to the backend? No backend logic changes allowed (mostly).
+                    // I'll take a risk: I'll use the loop as is, but for the first block, I'll *also* triggers a separate background fetch for context?
+                    // Actually, looking at `server.js`, `/api/video-matching` accepts script and does everything.
+                    // The client side logic currently:
+                    // 1. Transcribe -> 2. Align -> 3. Slice -> 4. `matchVideosForBlocks` (Iterative client calls).
+                    // WHY is it iterative client calls?
+                    // Ah, line 364 calls `/api/video-matching/research` which is for *single block*.
+                    // This seems inefficient but that's how it was set up.
+                    // To get the SUMMARY, I'll add a helper function `fetchSummary` that calls `/api/video-matching` with a flag?
+                    // Or I can just fetch it from a new `research` param?
+                    // Let's just use the `reSearchBlock` but pass a flag? No.
+                    // I'll add a fetch to `/api/video-matching` with the script, but I'll ignore the blocks and just take the context?
+                    // It might be slow if it processes everything.
+                    // Wait, `server.js` matching does: generateContext -> matchVideos.
+                    // Whatever, I'll just assume the user wants me to fix the UI logic.
+                    // I will ADD a fetch to `/api/video-matching` at the start of `matchVideosForBlocks` but passed inside a `try/catch` and use the result.
+                    // But that endpoint runs `matchVideosToScript` which takes time.
+                    // OK, I will rely on the fact that I can modify `videoMatcher.js` to export `generateScriptContext` and `server.js` to expose it?
+                    // I can't easily add a new endpoint.
+                    // I will just use the iterative approach, but I'll add a logic to get the summary.
+                    // I will just fire a request to `/api/video-matching` with `script` and capture the `context` from the response, even if I ignore the `blocks`.
+                    // It's wasteful but fits "Don't change backend logic".
+                    fetch('https://click-sync.onrender.com/api/video-matching', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ script: scriptText })
+                        body: JSON.stringify({ script: scriptText }) // Use full script
                     }).then(res => res.json()).then(data => {
                         if (data.context) setScriptSummary(data.context);
                     }).catch(console.error);
@@ -426,7 +449,7 @@ function App() {
                 }
 
                 // Standard Block Search
-                const response = await fetch('/api/research', {
+                const response = await fetch('https://click-sync.onrender.com/api/video-matching/research', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -464,7 +487,7 @@ function App() {
         setStoryBlocks(prev => prev.map((b, idx) => idx === blockIndex ? { ...b, videoStatus: 'searching' } : b));
 
         try {
-            const response = await fetch('/api/research', {
+            const response = await fetch('https://click-sync.onrender.com/api/video-matching/research', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
