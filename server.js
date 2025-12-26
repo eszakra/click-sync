@@ -27,7 +27,7 @@ const client = new AssemblyAI({
     apiKey: process.env.ASSEMBLYAI_API_KEY || "5ff41fbb9f314b57b4f8036534243b6b"
 });
 
-app.post('/transcribe', upload.single('audio'), async (req, res) => {
+app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No audio file uploaded' });
     }
