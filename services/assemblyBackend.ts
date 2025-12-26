@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase } from './supabaseClient';
 
 const API_URL = "https://click-sync-production.up.railway.app";
 

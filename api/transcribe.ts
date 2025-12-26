@@ -28,23 +28,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     try {
-        const form = formidable({ uploadDir: '/tmp', keepExtensions: true });
+        let audioUrl: string | undefined;
+        let localFilePath: string | undefined;
 
-        const [fields, files] = await form.parse(req);
-        const audioFile = files.audio?.[0];
+        // Check if content-type is JSON (for audioUrl)
+        if (req.headers['content-type']?.includes('application/json')) {
+            audioUrl = req.body.audioUrl;
+        } else {
+            // Otherwise assume multipart form (file upload)
+            const form = formidable({ uploadDir: '/tmp', keepExtensions: true });
+            const [fields, files] = await form.parse(req);
+            const audioFile = files.audio?.[0];
 
-        if (!audioFile) {
-            return res.status(400).json({ error: 'No audio file uploaded' });
+            if (audioFile) {
+                console.log(`[Transcribe API] Uploading file: ${audioFile.originalFilename}`);
+                audioUrl = await client.files.upload(audioFile.filepath);
+                localFilePath = audioFile.filepath;
+            }
         }
 
-        console.log(`[Transcribe API] Processing: ${audioFile.originalFilename}`);
+        if (!audioUrl) {
+            return res.status(400).json({ error: 'No audio source provided (audioUrl or file)' });
+        }
 
-        // Upload to AssemblyAI
-        const uploadUrl = await client.files.upload(audioFile.filepath);
+        console.log(`[Transcribe API] Transcribing: ${audioUrl}`);
 
         // Transcribe
         const transcript = await client.transcripts.transcribe({
-            audio_url: uploadUrl,
+            audio_url: audioUrl,
         });
 
         if (transcript.status === 'error') {
@@ -52,7 +63,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
 
         // Cleanup
-        fs.unlinkSync(audioFile.filepath);
+        if (localFilePath) {
+            fs.unlinkSync(localFilePath);
+        }
 
         res.json({
             text: transcript.text,
