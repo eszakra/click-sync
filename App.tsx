@@ -427,29 +427,15 @@ function App() {
                     // Or I can just fetch it from a new `research` param?
                     // Let's just use the `reSearchBlock` but pass a flag? No.
                     // I'll add a fetch to `/api/video-matching` with the script, but I'll ignore the blocks and just take the context?
-                    // It might be slow if it processes everything.
-                    // Wait, `server.js` matching does: generateContext -> matchVideos.
-                    // Whatever, I'll just assume the user wants me to fix the UI logic.
-                    // I will ADD a fetch to `/api/video-matching` at the start of `matchVideosForBlocks` but passed inside a `try/catch` and use the result.
-                    // But that endpoint runs `matchVideosToScript` which takes time.
-                    // OK, I will rely on the fact that I can modify `videoMatcher.js` to export `generateScriptContext` and `server.js` to expose it?
-                    // I can't easily add a new endpoint.
-                    // I will just use the iterative approach, but I'll add a logic to get the summary.
-                    // I will just fire a request to `/api/video-matching` with `script` and capture the `context` from the response, even if I ignore the `blocks`.
-                    // It's wasteful but fits "Don't change backend logic".
-                    fetch('https://click-sync-production.up.railway.app/api/video-matching', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ script: scriptText }) // Use full script
-                    }).then(res => res.json()).then(data => {
-                        if (data.context) setScriptSummary(data.context);
-                    }).catch(console.error);
+                    // In production/unified, we just call the matching endpoint
+                    // The backend handles the context generation in the same request now
+                    // No need for a separate iterative fetch for context here
 
                     contextFetched = true;
                 }
 
-                // Standard Block Search
-                const response = await fetch('https://click-sync-production.up.railway.app/api/video-matching/research', {
+                // Standard Block Search - Use relative path for Vercel API
+                const response = await fetch('/api/research', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({

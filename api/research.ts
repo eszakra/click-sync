@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { matchVideosToScript, generateScriptContext } from '../services/videoMatcher.js';
+import { reSearchBlock } from '../services/videoMatcher.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
     // CORS
@@ -15,29 +15,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const { script } = req.body;
+    const { block, customQuery } = req.body;
 
-    if (!script || typeof script !== 'string') {
-        return res.status(400).json({ error: 'Script is required' });
+    if (!block) {
+        return res.status(400).json({ error: 'Block data is required' });
     }
 
     try {
-        console.log('[API] Starting video matching context...');
-        const context = await generateScriptContext(script);
-
-        console.log('[API] Matching videos...');
-        const results = await matchVideosToScript(script);
-
-        console.log(`[API] Video matching complete: ${results.length} blocks processed`);
+        console.log(`[API] Re-searching block ${block.index}...`);
+        const result = await reSearchBlock(block, customQuery);
 
         res.json({
             success: true,
-            blocks: results,
-            context: context
+            block: result
         });
 
     } catch (error: any) {
-        console.error('[API] Video matching error:', error);
+        console.error('[API] Re-search error:', error);
         res.status(500).json({ error: error.message });
     }
 }
