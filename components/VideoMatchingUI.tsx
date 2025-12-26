@@ -322,7 +322,7 @@ export const VideoMatchingUI: React.FC<VideoMatchingUIProps> = ({ className = ''
         }, 3000);
 
         try {
-            const response = await fetch('https://click-sync.onrender.com/api/video-matching', {
+            const response = await fetch('http://localhost:5000/api/video-matching', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ script: scriptText })
@@ -367,7 +367,7 @@ export const VideoMatchingUI: React.FC<VideoMatchingUIProps> = ({ className = ''
         setLoadingBlocks(prev => [...prev, block.index]);
 
         try {
-            const response = await fetch('https://click-sync.onrender.com/api/video-matching/research', {
+            const response = await fetch('http://localhost:5000/api/video-matching/research', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ block })

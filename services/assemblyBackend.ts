@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 
-const API_URL = "https://click-sync.onrender.com";
+const API_URL = "http://localhost:5000";
 
 export interface AssemblyWord {
     text: string;
