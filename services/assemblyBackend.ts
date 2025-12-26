@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 
-const API_URL = "http://localhost:5000";
+const API_URL = "https://click-sync-production.up.railway.app";
 
 export interface AssemblyWord {
     text: string;
