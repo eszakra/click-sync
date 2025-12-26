@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { API_BASE_URL } from '../services/config';
 import { LiquidCard, LiquidButton, LiquidTextArea } from './LiquidUI';
 // @ts-ignore
 import { ArrowPathIcon, FilmIcon, MagnifyingGlassIcon, ChevronDownIcon, PlayIcon, ArrowTopRightOnSquareIcon, ClockIcon } from '@heroicons/react/24/solid';
@@ -322,7 +323,7 @@ export const VideoMatchingUI: React.FC<VideoMatchingUIProps> = ({ className = ''
         }, 3000);
 
         try {
-            const response = await fetch('http://localhost:5000/api/video-matching', {
+            const response = await fetch(`${API_BASE_URL}/api/video-matching`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ script: scriptText })
@@ -367,7 +368,7 @@ export const VideoMatchingUI: React.FC<VideoMatchingUIProps> = ({ className = ''
         setLoadingBlocks(prev => [...prev, block.index]);
 
         try {
-            const response = await fetch('http://localhost:5000/api/video-matching/research', {
+            const response = await fetch(`${API_BASE_URL}/api/video-matching/research`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ block })

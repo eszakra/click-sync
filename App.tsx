@@ -1,6 +1,7 @@
 // import { processFullAudioPipeline } from './services/gemini';
 import JSZip from 'jszip';
 import { AlignedSegment } from './services/gemini';
+import { API_BASE_URL } from './services/config';
 import { alignScriptDeterministic } from './services/matcher';
 import { transcribeWithAssembly } from './services/assemblyBackend';
 import { sliceAudioBuffer, decodeAudio } from './services/audioProcessor';
@@ -437,7 +438,8 @@ function App() {
                     // I will just use the iterative approach, but I'll add a logic to get the summary.
                     // I will just fire a request to `/api/video-matching` with `script` and capture the `context` from the response, even if I ignore the `blocks`.
                     // It's wasteful but fits "Don't change backend logic".
-                    fetch('http://localhost:5000/api/video-matching', {
+                    // Workaround: Call the main endpoint ONCE with the whole script to get context
+                    fetch(`${API_BASE_URL}/api/video-matching`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ script: scriptText }) // Use full script
@@ -449,7 +451,7 @@ function App() {
                 }
 
                 // Standard Block Search
-                const response = await fetch('http://localhost:5000/api/video-matching/research', {
+                const response = await fetch(`${API_BASE_URL}/api/video-matching/research`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -487,7 +489,7 @@ function App() {
         setStoryBlocks(prev => prev.map((b, idx) => idx === blockIndex ? { ...b, videoStatus: 'searching' } : b));
 
         try {
-            const response = await fetch('http://localhost:5000/api/video-matching/research', {
+            const response = await fetch(`${API_BASE_URL}/api/video-matching/research`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

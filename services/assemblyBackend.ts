@@ -1,6 +1,7 @@
 import { supabase } from './supabaseClient';
+import { API_BASE_URL } from './config';
 
-const API_URL = "http://localhost:5000";
+const API_URL = API_BASE_URL;
 
 export interface AssemblyWord {
     text: string;
@@ -15,70 +16,27 @@ export interface AssemblyResponse {
 }
 
 export const transcribeWithAssembly = async (file: File): Promise<AssemblyResponse> => {
+    // Unified Pipeline: Always send to Railway Backend
+    // This works for both Local (localhost:5000) and Prod (Railway URL)
+    console.log(`Uploading to Backend: ${API_URL}/transcribe`);
 
-    // 1. Check if Supabase is configured (Production/Vercel Mode)
-    if (supabase) {
-        try {
-            console.log("Uploading to Supabase...");
-            // A. Upload to Supabase
-            // Sanitize filename
-            const timestamp = Date.now();
-            const safeName = file.name.replace(/[^a-z0-9.]/gi, '_');
-            const filename = `upload-${timestamp}-${safeName}`;
-
-            const { data, error } = await supabase.storage
-                .from('audio-uploads')
-                .upload(filename, file);
-
-            if (error) throw new Error(`Upload Failed: ${error.message}`);
-
-            // B. Get Public URL
-            const { data: { publicUrl } } = supabase.storage
-                .from('audio-uploads')
-                .getPublicUrl(filename);
-
-            console.log("File uploaded, sending to Vercel API:", publicUrl);
-
-            // C. Call Vercel API with URL
-            const response = await fetch('/api/transcribe', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ audioUrl: publicUrl })
-            });
-
-            if (!response.ok) {
-                const errData = await response.json().catch(() => ({}));
-                throw new Error(errData.error || 'Transcription failed');
-            }
-
-            return await response.json();
-
-        } catch (err) {
-            console.error("Cloud processing failed, falling back to local if possible", err);
-            // If cloud fails, fall through to local
-        }
-    }
-
-    // 2. Local Fallback (Only allowed on localhost)
-    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-
-    if (!isLocalhost) {
-        throw new Error('Supabase configuration missing or Cloud upload failed. Check Vercel Environment Variables.');
-    }
-
-    console.log("Using Local Proxy...");
     const formData = new FormData();
     formData.append('audio', file);
 
-    const response = await fetch(`${API_URL}/transcribe`, {
-        method: 'POST',
-        body: formData,
-    });
+    try {
+        const response = await fetch(`${API_URL}/transcribe`, {
+            method: 'POST',
+            body: formData,
+        });
 
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || 'Failed to connect to transcription service');
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || 'Transcription failed on server');
+        }
+
+        return await response.json();
+    } catch (error: any) {
+        console.error("Transcription Error:", error);
+        throw new Error(error.message || "Failed to connect to backend");
     }
-
-    return await response.json();
 };
