@@ -87,11 +87,14 @@ export const LiquidButton: React.FC<LiquidButtonProps> = ({
 };
 
 // -- TEXT AREA (Refined to match) --
-export const LiquidTextArea = (props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) => (
+export const LiquidTextArea = ({ className = '', ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement>) => (
     <div className="relative group">
         <textarea
-            className="w-full bg-transparent text-gray-300 text-sm leading-relaxed p-4 rounded-xl border border-white/10 focus:border-[#FF0055]/50 focus:ring-0 outline-none transition-all resize-none placeholder-gray-700 font-mono focus:bg-white/[0.02]"
-            style={{ minHeight: '200px' }}
+            className={`w-full bg-transparent text-gray-300 text-sm leading-relaxed p-4 rounded-xl border border-white/10 focus:border-[#FF0055]/50 focus:ring-0 outline-none transition-all resize-none placeholder-gray-700 font-mono focus:bg-white/[0.02] active:bg-transparent ${className}`}
+            style={{
+                minHeight: '200px',
+                backgroundImage: 'none'
+            }}
             {...props}
         />
         {/* Subtle Shine Bottom */}
