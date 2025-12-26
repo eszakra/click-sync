@@ -70,7 +70,7 @@ export const transcribeWithAssembly = async (file: File): Promise<AssemblyRespon
     const formData = new FormData();
     formData.append('audio', file);
 
-    const response = await fetch(`${API_URL}/transcribe`, {
+    const response = await fetch('/api/transcribe', {
         method: 'POST',
         body: formData,
     });

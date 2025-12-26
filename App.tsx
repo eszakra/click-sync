@@ -473,7 +473,7 @@ function App() {
         setStoryBlocks(prev => prev.map((b, idx) => idx === blockIndex ? { ...b, videoStatus: 'searching' } : b));
 
         try {
-            const response = await fetch('https://click-sync-production.up.railway.app/api/video-matching/research', {
+            const response = await fetch('/api/research', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
