@@ -14,7 +14,6 @@ import { ArrowDownTrayIcon, PlayIcon, PauseIcon, ArrowPathIcon, SparklesIcon, Ch
 import TitleBar from './components/TitleBar';
 import { ToastContainer, ToastMessage, ToastType } from './components/Toast';
 import { StartScreen } from './components/StartScreen';
-import { UpdateNotification } from './components/UpdateNotification';
 import { SettingsModal } from './components/SettingsModal';
 import { projectService, ProjectData } from './services/projectService';
 
@@ -1450,13 +1449,6 @@ function App() {
                     onInstall={handleInstallUpdate}
                     onDismiss={() => setUpdateStatus({ ...updateStatus, status: 'idle' })}
                 />
-                <SettingsModal
-                    isOpen={showSettings}
-                    onClose={() => setShowSettings(false)}
-                    apiKey={apiKeyInput}
-                    onSaveKey={updateApiKey}
-                    appVersion={appVersion}
-                />
                 <StartScreen
                     recents={recentProjects}
                     onNewProject={handleNewProject}
@@ -1467,274 +1459,273 @@ function App() {
                     onRename={async (id, newName) => {
                         await projectService.renameProject(id, newName);
                         // Refresh list
-                        setRecentProjects(prev => prev.map(p => p.id === id ? { ...p, name: newName } : p));
+                        const list = await projectService.getRecentProjects();
+                        setRecentProjects(list);
                     }}
-                    onOpenSettings={() => setShowSettings(true)}
                 />
-            </>
-        );
-    }
-    const list = await projectService.getRecentProjects();
-    setRecentProjects(list);
-}}
+                <SettingsModal
+                    isOpen={showSettings}
+                    onClose={() => setShowSettings(false)}
+                    appVersion={appVersion}
+                    apiKey={apiKeyInput}
+                    onApiKeyChange={setApiKeyInput}
                 />
             </>
         );
     }
 
-// --- RENDER EDITOR ---
-return (
-    <>
-        <TitleBar />
-        <UpdateNotification
-            status={updateStatus.status}
-            progress={updateStatus.progress}
-            version={updateStatus.version}
-            onDownload={handleDownloadUpdate}
-            onInstall={handleInstallUpdate}
-            onDismiss={() => setUpdateStatus({ ...updateStatus, status: 'idle' })}
-        />
-        <ToastContainer toasts={toasts} removeToast={removeToast} />
-        <div className="min-h-screen bg-[#050505] flex flex-col"> {/* Full Screen Flex */}
-            {/* Main Content Scrollable Area */}
-            {/*  PT-0 because Header is sticky top-0 now, but TitleBar is fixed? 
+    // --- RENDER EDITOR ---
+    return (
+        <>
+            <TitleBar />
+            <UpdateNotification
+                status={updateStatus.status}
+                progress={updateStatus.progress}
+                version={updateStatus.version}
+                onDownload={handleDownloadUpdate}
+                onInstall={handleInstallUpdate}
+                onDismiss={() => setUpdateStatus({ ...updateStatus, status: 'idle' })}
+            />
+            <ToastContainer toasts={toasts} removeToast={removeToast} />
+            <div className="min-h-screen bg-[#050505] flex flex-col"> {/* Full Screen Flex */}
+                {/* Main Content Scrollable Area */}
+                {/*  PT-0 because Header is sticky top-0 now, but TitleBar is fixed? 
                       TitleBar is usually fixed/absolute. 
                       Let's assume TitleBar needs space. 
                   */}
-            <div className="flex-1 max-w-[1920px] w-full mx-auto p-6 md:p-12 pb-40"> {/* Removed pt-16, handling flow differently */}
+                <div className="flex-1 max-w-[1920px] w-full mx-auto p-6 md:p-12 pb-40"> {/* Removed pt-16, handling flow differently */}
 
-                {/* HEADER (Full Width) */}
-                <div className="sticky top-0 z-50 w-full bg-[#050505]/95 backdrop-blur-xl border-b border-white/5 transition-all duration-300">
-                    <div className="max-w-[1920px] mx-auto px-6 md:px-12 h-20 flex items-center justify-between">
-                        <div className="flex items-center gap-6">
-                            {/* Back to Projects Button */}
-                            <button
-                                onClick={handleBackToStart}
-                                className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors group"
-                                title="Back to Projects"
-                            >
-                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                                </svg>
-                            </button>
+                    {/* HEADER (Full Width) */}
+                    <div className="sticky top-0 z-50 w-full bg-[#050505]/95 backdrop-blur-xl border-b border-white/5 transition-all duration-300">
+                        <div className="max-w-[1920px] mx-auto px-6 md:px-12 h-20 flex items-center justify-between">
+                            <div className="flex items-center gap-6">
+                                {/* Back to Projects Button */}
+                                <button
+                                    onClick={handleBackToStart}
+                                    className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors group"
+                                    title="Back to Projects"
+                                >
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                                    </svg>
+                                </button>
 
-                            <div className="flex items-baseline gap-2">
-                                <h1 className="text-2xl font-extrabold tracking-tighter text-white">
-                                    ClickSync<span className="text-[#FF0055]">.</span>
-                                </h1>
-                                <span className="px-2 py-0.5 rounded bg-white/5 text-[10px] uppercase font-bold text-gray-400 tracking-widest border border-white/5">
-                                    Unified Studio
-                                </span>
-                                {currentProject && (
-                                    <span className="ml-4 text-xs text-gray-500 font-mono hidden md:inline-block">
-                                        / {currentProject.name}
+                                <div className="flex items-baseline gap-2">
+                                    <h1 className="text-2xl font-extrabold tracking-tighter text-white">
+                                        ClickSync<span className="text-[#FF0055]">.</span>
+                                    </h1>
+                                    <span className="px-2 py-0.5 rounded bg-white/5 text-[10px] uppercase font-bold text-gray-400 tracking-widest border border-white/5">
+                                        Unified Studio
                                     </span>
-                                )}
-                            </div>
-                        </div>
-
-                        {/* Right Toolbar */}
-                        <div className="flex items-center gap-6">
-                            {/* Status Pill */}
-                            <div className="flex items-center gap-3 bg-white/5 px-4 py-1.5 rounded-full border border-white/5">
-                                <div className={`w-2 h-2 rounded-full ${procState.status === 'error' ? 'bg-red-500' : procState.status !== 'idle' && procState.status !== 'completed' ? 'bg-[#FF0055] animate-pulse' : 'bg-[#00FF88]'} shadow-[0_0_10px_currentColor]`} />
-                                <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-gray-400">
-                                    {procState.status === 'idle' ? 'SYSTEM READY' : procState.status}
-                                </span>
-                            </div>
-
-                            <div className="h-6 w-[1px] bg-white/10" />
-
-                            <button
-                                onClick={() => setShowSettings(true)}
-                                className="p-2 rounded-full hover:bg-white/5 text-gray-400 hover:text-white transition-colors"
-                                title="API Settings"
-                            >
-                                <Cog6ToothIcon className="w-5 h-5" />
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                {/* PROCESSING OVERLAY (Hero) - Now includes stats when completed */}
-                {/* Fixed Sticky Wrapper - Must be outside AnimatePresence for position: sticky to work reliably in some contexts, or ensure parent is tall. 
-                    Actually, we'll make the WRAPPER sticky. 
-                */}
-                <div className={`transition-all duration-300 z-30 ${procState.status !== 'idle' && procState.status !== 'error' && procState.status !== 'completed' ? 'sticky top-20' : ''}`}>
-                    <AnimatePresence>
-                        {(procState.status !== 'idle' && procState.status !== 'error') && (
-                            <motion.div
-                                initial={{ opacity: 0, y: -20 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0 }}
-                                className="mb-0" // Removed margin from motion div, handling in wrapper or parent spacing
-                            >
-                                <ProcessingHero state={procState} />
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-                </div>
-                {/* Spacer if sticky is active to prevent jump? No, sticky takes space. */}
-                {(procState.status !== 'idle' && procState.status !== 'error') && <div className="h-8" />}
-
-                <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start">
-
-                    {/* --- LEFT COLUMN: INPUTS (4 cols) --- */}
-                    <div className="xl:col-span-4 flex flex-col gap-6">
-
-                        {/* INPUT CARD 1: AUDIO */}
-                        <LiquidCard title="1. Link Audio">
-                            <LiquidDropZone
-                                label="Drop Voiceover File"
-                                fileName={audioFile?.name}
-                                accept="audio/*"
-                                onFileSelect={handleAudioSelect}
-                            />
-
-                            {/* Isolated Player to prevent full re-renders */}
-                            <SourceAudioPlayer audioFile={audioFile} />
-                        </LiquidCard>
-
-                        {/* INPUT CARD 2: SCRIPT */}
-                        <LiquidCard title="2. Input Script">
-                            <LiquidTextArea
-                                placeholder="Paste script with [ON SCREEN: Scene Name] markers..."
-                                value={scriptText}
-                                onChange={(e) => setScriptText(e.target.value)}
-                                disabled={procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error'}
-                                className={`min-h-[300px] text-xs font-mono ${procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error' ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            />
-                            <div className="pt-4 h-[52px]"> {/* Fixed height container */}
-                                {procState.status === 'idle' || procState.status === 'completed' || procState.status === 'error' ? (
-                                    <LiquidButton
-                                        disabled={!audioFile || !scriptText?.trim()}
-                                        onClick={startProcessing}
-                                        className="w-full py-4 text-sm font-bold shadow-lg shadow-[#FF0055]/10 hover:shadow-[#FF0055]/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                                    >
-                                        <span className="flex items-center justify-center gap-2">
-                                            <SparklesIcon className="w-4 h-4" />
-                                            GENERATE TIMELINE
+                                    {currentProject && (
+                                        <span className="ml-4 text-xs text-gray-500 font-mono hidden md:inline-block">
+                                            / {currentProject.name}
                                         </span>
-                                    </LiquidButton>
-                                ) : (
-                                    <div className="w-full h-12 relative overflow-hidden rounded-xl bg-black/40 border border-[#FF0055]/20 flex items-stretch">
-                                        {/* Left Side: Status Text */}
-                                        <div className="flex-1 flex items-center gap-3 px-6 relative">
-                                            {/* Living Background Effect (Subtle Breathing) */}
-                                            <div className="absolute inset-0 bg-[#FF0055]/5 animate-pulse" style={{ animationDuration: '3s' }} />
-                                            <div className="absolute -left-10 top-0 bottom-0 w-32 bg-gradient-to-r from-transparent via-[#FF0055]/10 to-transparent blur-xl opacity-50 animate-pulse" />
-
-                                            <div className="relative flex items-center gap-3">
-                                                <div className="relative flex h-2 w-2">
-                                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF0055] opacity-75"></span>
-                                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#FF0055]"></span>
-                                                </div>
-                                                <span className="text-[10px] font-bold text-[#FF0055] tracking-[0.2em] uppercase animate-pulse">
-                                                    GENERATING TIMELINE...
-                                                </span>
-                                            </div>
-                                        </div>
-
-                                        {/* Right Side: Solid Cancel Block */}
-                                        <button
-                                            onClick={cancelProcessing}
-                                            className="px-6 h-full flex items-center justify-center bg-white/5 hover:bg-red-500/20 text-gray-500 hover:text-red-400 transition-colors border-l border-white/10 z-10"
-                                            title="Stop Generation"
-                                        >
-                                            <span className="text-[10px] font-bold uppercase tracking-widest">Stop</span>
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-                        </LiquidCard>
-
-                    </div>
-
-                    {/* --- RIGHT COLUMN: RESULTS (8 cols) --- */}
-                    <div className="xl:col-span-8 space-y-6">
-
-                        {/* Top Bar: Summary & Download */}
-                        {(storyBlocks.length > 0) && (
-                            <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-4 rounded-xl bg-white/5 border border-white/10 backdrop-blur-md">
-                                <div className="flex-1">
-                                    <h2 className="text-lg font-bold text-white mb-1">Generated Context Summary</h2>
-                                    {scriptSummary ? (
-                                        <p className="text-sm text-gray-400 leading-relaxed">{scriptSummary}</p>
-                                    ) : (
-                                        <div className="h-4 w-48 bg-white/5 rounded animate-pulse" />
                                     )}
                                 </div>
-                                <div className="flex items-center gap-3 shrink-0">
-                                    {/* Segment Count */}
-                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-lg border border-white/10">
-                                        <FilmIcon className="w-4 h-4 text-[#FF0055]" />
-                                        <span className="text-xs font-medium text-white">{storyBlocks.length} Segments</span>
-                                    </div>
+                            </div>
 
-                                    {/* Total Duration */}
-                                    {(() => {
-                                        const totalSeconds = storyBlocks.reduce((acc, block) => acc + (block.duration || 0), 0);
-                                        const minutes = Math.floor(totalSeconds / 60);
-                                        const seconds = Math.floor(totalSeconds % 60);
-                                        return (
-                                            <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-lg border border-white/10">
-                                                <ClockIcon className="w-4 h-4 text-[#FF0055]" />
-                                                <span className="text-xs font-medium text-white">{minutes}:{seconds.toString().padStart(2, '0')}</span>
+                            {/* Right Toolbar */}
+                            <div className="flex items-center gap-6">
+                                {/* Status Pill */}
+                                <div className="flex items-center gap-3 bg-white/5 px-4 py-1.5 rounded-full border border-white/5">
+                                    <div className={`w-2 h-2 rounded-full ${procState.status === 'error' ? 'bg-red-500' : procState.status !== 'idle' && procState.status !== 'completed' ? 'bg-[#FF0055] animate-pulse' : 'bg-[#00FF88]'} shadow-[0_0_10px_currentColor]`} />
+                                    <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-gray-400">
+                                        {procState.status === 'idle' ? 'SYSTEM READY' : procState.status}
+                                    </span>
+                                </div>
+
+                                <div className="h-6 w-[1px] bg-white/10" />
+
+                                <button
+                                    onClick={() => setShowSettings(true)}
+                                    className="p-2 rounded-full hover:bg-white/5 text-gray-400 hover:text-white transition-colors"
+                                    title="API Settings"
+                                >
+                                    <Cog6ToothIcon className="w-5 h-5" />
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* PROCESSING OVERLAY (Hero) - Now includes stats when completed */}
+                    {/* Fixed Sticky Wrapper - Must be outside AnimatePresence for position: sticky to work reliably in some contexts, or ensure parent is tall. 
+                    Actually, we'll make the WRAPPER sticky. 
+                */}
+                    <div className={`transition-all duration-300 z-30 ${procState.status !== 'idle' && procState.status !== 'error' && procState.status !== 'completed' ? 'sticky top-20' : ''}`}>
+                        <AnimatePresence>
+                            {(procState.status !== 'idle' && procState.status !== 'error') && (
+                                <motion.div
+                                    initial={{ opacity: 0, y: -20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0 }}
+                                    className="mb-0" // Removed margin from motion div, handling in wrapper or parent spacing
+                                >
+                                    <ProcessingHero state={procState} />
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                    </div>
+                    {/* Spacer if sticky is active to prevent jump? No, sticky takes space. */}
+                    {(procState.status !== 'idle' && procState.status !== 'error') && <div className="h-8" />}
+
+                    <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start">
+
+                        {/* --- LEFT COLUMN: INPUTS (4 cols) --- */}
+                        <div className="xl:col-span-4 flex flex-col gap-6">
+
+                            {/* INPUT CARD 1: AUDIO */}
+                            <LiquidCard title="1. Link Audio">
+                                <LiquidDropZone
+                                    label="Drop Voiceover File"
+                                    fileName={audioFile?.name}
+                                    accept="audio/*"
+                                    onFileSelect={handleAudioSelect}
+                                />
+
+                                {/* Isolated Player to prevent full re-renders */}
+                                <SourceAudioPlayer audioFile={audioFile} />
+                            </LiquidCard>
+
+                            {/* INPUT CARD 2: SCRIPT */}
+                            <LiquidCard title="2. Input Script">
+                                <LiquidTextArea
+                                    placeholder="Paste script with [ON SCREEN: Scene Name] markers..."
+                                    value={scriptText}
+                                    onChange={(e) => setScriptText(e.target.value)}
+                                    disabled={procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error'}
+                                    className={`min-h-[300px] text-xs font-mono ${procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error' ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                />
+                                <div className="pt-4 h-[52px]"> {/* Fixed height container */}
+                                    {procState.status === 'idle' || procState.status === 'completed' || procState.status === 'error' ? (
+                                        <LiquidButton
+                                            disabled={!audioFile || !scriptText?.trim()}
+                                            onClick={startProcessing}
+                                            className="w-full py-4 text-sm font-bold shadow-lg shadow-[#FF0055]/10 hover:shadow-[#FF0055]/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            <span className="flex items-center justify-center gap-2">
+                                                <SparklesIcon className="w-4 h-4" />
+                                                GENERATE TIMELINE
+                                            </span>
+                                        </LiquidButton>
+                                    ) : (
+                                        <div className="w-full h-12 relative overflow-hidden rounded-xl bg-black/40 border border-[#FF0055]/20 flex items-stretch">
+                                            {/* Left Side: Status Text */}
+                                            <div className="flex-1 flex items-center gap-3 px-6 relative">
+                                                {/* Living Background Effect (Subtle Breathing) */}
+                                                <div className="absolute inset-0 bg-[#FF0055]/5 animate-pulse" style={{ animationDuration: '3s' }} />
+                                                <div className="absolute -left-10 top-0 bottom-0 w-32 bg-gradient-to-r from-transparent via-[#FF0055]/10 to-transparent blur-xl opacity-50 animate-pulse" />
+
+                                                <div className="relative flex items-center gap-3">
+                                                    <div className="relative flex h-2 w-2">
+                                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF0055] opacity-75"></span>
+                                                        <span className="relative inline-flex rounded-full h-2 w-2 bg-[#FF0055]"></span>
+                                                    </div>
+                                                    <span className="text-[10px] font-bold text-[#FF0055] tracking-[0.2em] uppercase animate-pulse">
+                                                        GENERATING TIMELINE...
+                                                    </span>
+                                                </div>
                                             </div>
-                                        );
-                                    })()}
 
-                                    <LiquidButton variant="secondary" onClick={downloadAllSegments} className="flex items-center gap-2">
-                                        <ArrowDownTrayIcon className="w-4 h-4" />
-                                        <span>Download .ZIP</span>
-                                    </LiquidButton>
+                                            {/* Right Side: Solid Cancel Block */}
+                                            <button
+                                                onClick={cancelProcessing}
+                                                className="px-6 h-full flex items-center justify-center bg-white/5 hover:bg-red-500/20 text-gray-500 hover:text-red-400 transition-colors border-l border-white/10 z-10"
+                                                title="Stop Generation"
+                                            >
+                                                <span className="text-[10px] font-bold uppercase tracking-widest">Stop</span>
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
-                            </div>
-                        )}
+                            </LiquidCard>
 
-                        {storyBlocks.length === 0 && procState.status === 'idle' && (
-                            <div className="h-[600px] flex flex-col items-center justify-center text-center opacity-30">
-                                <FilmIcon className="w-24 h-24 text-white mb-4" />
-                                <h3 className="text-xl font-bold text-white">Ready for Production</h3>
-                                <p className="text-sm text-gray-400 max-w-md mt-2">
-                                    Import your voiceover and script to begin the automated alignment and matching process.
-                                </p>
-                            </div>
-                        )}
-
-                        {/* RESULT BLOCKS */}
-                        <div className="space-y-4">
-                            {storyBlocks.map((block, idx) => (
-                                <div key={block.id} className="contain-content">
-                                    <ResultBlockItem
-                                        block={block}
-                                        blockIndex={idx}
-                                        playingId={playingId}
-                                        isExpanded={expandedBlocks.has(block.id)}
-                                        onToggleExpand={toggleBlockExpansion}
-                                        onPlay={playPreview}
-                                        onRetry={retryVideoMatch}
-                                    />
-                                </div>
-                            ))}
                         </div>
 
+                        {/* --- RIGHT COLUMN: RESULTS (8 cols) --- */}
+                        <div className="xl:col-span-8 space-y-6">
+
+                            {/* Top Bar: Summary & Download */}
+                            {(storyBlocks.length > 0) && (
+                                <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-4 rounded-xl bg-white/5 border border-white/10 backdrop-blur-md">
+                                    <div className="flex-1">
+                                        <h2 className="text-lg font-bold text-white mb-1">Generated Context Summary</h2>
+                                        {scriptSummary ? (
+                                            <p className="text-sm text-gray-400 leading-relaxed">{scriptSummary}</p>
+                                        ) : (
+                                            <div className="h-4 w-48 bg-white/5 rounded animate-pulse" />
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-3 shrink-0">
+                                        {/* Segment Count */}
+                                        <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-lg border border-white/10">
+                                            <FilmIcon className="w-4 h-4 text-[#FF0055]" />
+                                            <span className="text-xs font-medium text-white">{storyBlocks.length} Segments</span>
+                                        </div>
+
+                                        {/* Total Duration */}
+                                        {(() => {
+                                            const totalSeconds = storyBlocks.reduce((acc, block) => acc + (block.duration || 0), 0);
+                                            const minutes = Math.floor(totalSeconds / 60);
+                                            const seconds = Math.floor(totalSeconds % 60);
+                                            return (
+                                                <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-lg border border-white/10">
+                                                    <ClockIcon className="w-4 h-4 text-[#FF0055]" />
+                                                    <span className="text-xs font-medium text-white">{minutes}:{seconds.toString().padStart(2, '0')}</span>
+                                                </div>
+                                            );
+                                        })()}
+
+                                        <LiquidButton variant="secondary" onClick={downloadAllSegments} className="flex items-center gap-2">
+                                            <ArrowDownTrayIcon className="w-4 h-4" />
+                                            <span>Download .ZIP</span>
+                                        </LiquidButton>
+                                    </div>
+                                </div>
+                            )}
+
+                            {storyBlocks.length === 0 && procState.status === 'idle' && (
+                                <div className="h-[600px] flex flex-col items-center justify-center text-center opacity-30">
+                                    <FilmIcon className="w-24 h-24 text-white mb-4" />
+                                    <h3 className="text-xl font-bold text-white">Ready for Production</h3>
+                                    <p className="text-sm text-gray-400 max-w-md mt-2">
+                                        Import your voiceover and script to begin the automated alignment and matching process.
+                                    </p>
+                                </div>
+                            )}
+
+                            {/* RESULT BLOCKS */}
+                            <div className="space-y-4">
+                                {storyBlocks.map((block, idx) => (
+                                    <div key={block.id} className="contain-content">
+                                        <ResultBlockItem
+                                            block={block}
+                                            blockIndex={idx}
+                                            playingId={playingId}
+                                            isExpanded={expandedBlocks.has(block.id)}
+                                            onToggleExpand={toggleBlockExpansion}
+                                            onPlay={playPreview}
+                                            onRetry={retryVideoMatch}
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+
+                        </div>
                     </div>
                 </div>
+
+                {/* GLOBAL SETTINGS MODAL */}
+                <SettingsModal
+                    isOpen={showSettings}
+                    onClose={() => setShowSettings(false)}
+                    appVersion={appVersion}
+                    apiKey={apiKeyInput}
+                    onApiKeyChange={setApiKeyInput}
+                />
             </div>
-
-            {/* SETTINGS MODAL */}
-            <SettingsModal
-                isOpen={showSettings}
-                onClose={() => setShowSettings(false)}
-                apiKey={apiKeyInput}
-                onSaveKey={updateApiKey}
-                appVersion={appVersion}
-            />
-
-        </div>
-    </>
-);
+        </>
+    );
 }
 
 export default App;
