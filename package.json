@@ -2,7 +2,7 @@
   "name": "click-sync",
   "productName": "Click Sync",
   "private": true,
-  "version": "1.0.9",
+  "version": "1.0.91",
   "description": "AI-Powered Video Matching & Audio Transcription Studio",
   "author": "ClickSync Team",
   "type": "module",
