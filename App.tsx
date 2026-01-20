@@ -540,6 +540,8 @@ const ResultBlockItem: React.FC<{
 
                             const lines = formatTitleToLines(block.title);
 
+                            return (
+                                <>
                                     {lines.map((line, i) => (
                                         <span key={i} className={`block text-xs font-bold text-white tracking-wide uppercase leading-snug ${!line ? 'invisible' : ''} ${i === 0 ? 'text-white/95' : i === 1 ? 'text-white/85' : 'text-white/75'}`}>
                                             {line || "-"}
@@ -552,59 +554,59 @@ const ResultBlockItem: React.FC<{
 
                     {/* Copy Button (Right Side) - Now uses the same formatting logic */}
                     {(() => {
-                         // We need to re-calculate lines for the button click, or ideally hoist the calculator. 
-                         // To keep it simple and safe within this structure:
-                         const formatTitleToLines = (title: string): string[] => {
-                                const text = title || "";
-                                const clean = text.replace(/\s+/g, ' ').trim();
-                                let lines = ["", "", ""];
-                                const parts = clean.split(/—|:| - /).map(s => s.trim()).filter(Boolean);
-                                if (parts.length >= 3) {
-                                    lines = parts.slice(0, 3);
-                                } else if (parts.length === 2) {
-                                    const [p1, p2] = parts;
-                                    if (p1.length > p2.length * 1.5) {
-                                        const mid = Math.floor(p1.length / 2);
-                                        const splitIdx = p1.lastIndexOf(' ', mid);
-                                        lines = [
-                                            p1.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
-                                            p1.substring(splitIdx === -1 ? mid : splitIdx).trim(),
-                                            p2
-                                        ];
-                                    } else {
-                                        const mid = Math.floor(p2.length / 2);
-                                        const splitIdx = p2.lastIndexOf(' ', mid);
-                                        lines = [
-                                            p1,
-                                            p2.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
-                                            p2.substring(splitIdx === -1 ? mid : splitIdx).trim()
-                                        ];
-                                    }
+                        // We need to re-calculate lines for the button click, or ideally hoist the calculator. 
+                        // To keep it simple and safe within this structure:
+                        const formatTitleToLines = (title: string): string[] => {
+                            const text = title || "";
+                            const clean = text.replace(/\s+/g, ' ').trim();
+                            let lines = ["", "", ""];
+                            const parts = clean.split(/—|:| - /).map(s => s.trim()).filter(Boolean);
+                            if (parts.length >= 3) {
+                                lines = parts.slice(0, 3);
+                            } else if (parts.length === 2) {
+                                const [p1, p2] = parts;
+                                if (p1.length > p2.length * 1.5) {
+                                    const mid = Math.floor(p1.length / 2);
+                                    const splitIdx = p1.lastIndexOf(' ', mid);
+                                    lines = [
+                                        p1.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
+                                        p1.substring(splitIdx === -1 ? mid : splitIdx).trim(),
+                                        p2
+                                    ];
                                 } else {
-                                    const words = clean.split(' ');
-                                    if (words.length <= 3) {
-                                        lines = [words[0] || "", words[1] || "", words[2] || ""];
-                                    } else {
-                                        const targetLen = clean.length / 3;
-                                        let current = "";
-                                        let lineIdx = 0;
-                                        words.forEach(word => {
-                                            if (lineIdx >= 2) {
-                                                lines[2] += (lines[2] ? " " : "") + word;
-                                            } else {
-                                                if ((current.length + word.length) > targetLen && current.length > 0) {
-                                                    lines[lineIdx] = current;
-                                                    current = word;
-                                                    lineIdx++;
-                                                } else {
-                                                    current += (current ? " " : "") + word;
-                                                }
-                                            }
-                                        });
-                                        if (lineIdx < 3) lines[lineIdx] = current;
-                                    }
+                                    const mid = Math.floor(p2.length / 2);
+                                    const splitIdx = p2.lastIndexOf(' ', mid);
+                                    lines = [
+                                        p1,
+                                        p2.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
+                                        p2.substring(splitIdx === -1 ? mid : splitIdx).trim()
+                                    ];
                                 }
-                                return lines;
+                            } else {
+                                const words = clean.split(' ');
+                                if (words.length <= 3) {
+                                    lines = [words[0] || "", words[1] || "", words[2] || ""];
+                                } else {
+                                    const targetLen = clean.length / 3;
+                                    let current = "";
+                                    let lineIdx = 0;
+                                    words.forEach(word => {
+                                        if (lineIdx >= 2) {
+                                            lines[2] += (lines[2] ? " " : "") + word;
+                                        } else {
+                                            if ((current.length + word.length) > targetLen && current.length > 0) {
+                                                lines[lineIdx] = current;
+                                                current = word;
+                                                lineIdx++;
+                                            } else {
+                                                current += (current ? " " : "") + word;
+                                            }
+                                        }
+                                    });
+                                    if (lineIdx < 3) lines[lineIdx] = current;
+                                }
+                            }
+                            return lines;
                         };
 
                         return (
