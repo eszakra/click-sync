@@ -1,17 +1,33 @@
 
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
-import { GEMINI_API_KEY } from "../config";
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 // @ts-ignore
 import { AssemblyWord } from "./assemblyBackend";
+import { AlignedSegment } from "../types";
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+// Default Key (Fallback)
+const DEFAULT_KEY = "AIzaSyC0QCO0_h3jb6l2rDV738Rv8hAvf6_5atk";
 
-export interface AlignedSegment {
-  title: string;
-  text?: string; // Added text field
-  start_time: number;
-  end_time: number;
+function getApiKey(): string {
+  try {
+    const configPath = path.join(os.homedir(), '.clicksync', 'config.json');
+    if (fs.existsSync(configPath)) {
+      const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (data.geminiKey && data.geminiKey.trim().length > 10) {
+        return data.geminiKey.trim();
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load Gemini API key from config:", e);
+  }
+  return DEFAULT_KEY;
 }
+
+const genAI = new GoogleGenerativeAI(getApiKey());
+
+export type { AlignedSegment }; // Re-export if needed, or consumers should import from types
 
 // Re-introducing the Alignment logic, tailored for AssemblyAI's word format
 export const alignScriptWithAssembly = async (
@@ -20,7 +36,7 @@ export const alignScriptWithAssembly = async (
 ): Promise<AlignedSegment[]> => {
 
   const model = genAI.getGenerativeModel({
-    model: "gemini-1.5-flash-001",
+    model: "gemini-3-pro-preview", // User requested to keep this model
     generationConfig: {
       responseMimeType: "application/json",
       responseSchema: {

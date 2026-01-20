@@ -46,30 +46,24 @@ body {
     background: rgba(255, 255, 255, 0.25);
 }
 
+/* PERFORMANCE OPTIMIZATION UTILITY */
+/* Prevents rendering off-screen content, fixing "Freeze on Restore" */
+.contain-content {
+    content-visibility: auto;
+    contain-intrinsic-size: 1px 200px; /* Estimate height of a closed block */
+}
+
 /* Utility classes for that specific look */
 .apple-card {
     background: var(--glass-surface);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     border: 1px solid var(--glass-border);
     box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+    will-change: transform; /* Hint for compositor */
 }
 
-.apple-button {
-    background: var(--primary-blue);
-    color: white;
-    font-weight: 500;
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.apple-button:hover {
-    transform: scale(1.02);
-    box-shadow: 0 0 20px rgba(41, 151, 255, 0.4);
-}
-
-.apple-button:active {
-    transform: scale(0.98);
-}
+/* ... existing code ... */
 
 /* Cinematic Neural Loader */
 .liquid-loader {
@@ -79,6 +73,7 @@ body {
     position: relative;
     border: 1px solid rgba(255, 0, 85, 0.1);
     box-shadow: 0 0 30px rgba(255, 0, 85, 0.1);
+    will-change: transform;
 }
 
 .liquid-loader::before,
@@ -97,7 +92,8 @@ body {
     border-top: 2px solid #FF0055;
     border-right: 2px solid transparent;
     animation: neural-spin 1s linear infinite;
-    filter: drop-shadow(0 0 10px #FF0055);
+    /* Removed expensive drop-shadow filter */
+    box-shadow: inset 0 0 10px rgba(255, 0, 85, 0.5); 
 }
 
 /* Outer Reverse Arc */
@@ -293,4 +289,18 @@ body {
 
 .apple-slider-filled::-moz-range-track {
     background: transparent !important;
+}
+
+/* Custom scrollbar for text areas */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(255, 0, 85, 0.2);
+    border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 0, 85, 0.4);
 }

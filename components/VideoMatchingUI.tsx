@@ -16,20 +16,47 @@ interface BlockWithVideos {
     headline: string;
     text: string;
     searchQuery: string;
+    finalQuery?: string;
+    queriesAttempted?: string[];
+    fallbackReasons?: string[];
+    attemptNum?: number;
+    maxAttempts?: number;
     videos: VideoResult[];
-    status?: 'waiting' | 'generating_query' | 'searching' | 'complete' | 'error';
+    status?: 'waiting' | 'generating_queries' | 'searching' | 'searching_specific' | 'searching_entity' | 'searching_variant' | 'searching_broad' | 'complete' | 'no_results' | 'error';
 }
 
 interface ProcessingStatus {
     blockIndex: number;
-    status: 'waiting' | 'generating_query' | 'searching' | 'complete' | 'error';
+    status: 'waiting' | 'generating_queries' | 'searching' | 'searching_specific' | 'searching_entity' | 'searching_variant' | 'searching_broad' | 'complete' | 'no_results' | 'error';
     query?: string;
     videoCount?: number;
+    attemptNum?: number;
+    maxAttempts?: number;
+    fallbackReason?: string;
+    queriesAttempted?: string[];
 }
 
 interface VideoMatchingUIProps {
     className?: string;
 }
+
+// HELPER: Status labels map
+const statusLabels: Record<string, string> = {
+    waiting: 'Waiting...',
+    analyzing: 'Analyzing block...',
+    extracted: 'Entities found',
+    generating_queries: 'Generating queries...',
+    searching: 'Searching Viory...',
+    searching_specific: 'Trying specific...',
+    searching_entity: 'Searching entity...',
+    searching_variant: 'Trying variant...',
+    searching_broad: 'Broad search...',
+    fallback: 'Trying fallback...',
+    success: 'Found match!',
+    complete: 'Complete',
+    no_results: 'No videos found',
+    error: 'Error'
+};
 
 // Compact video thumbnail for capsule grid
 const CompactVideoThumb: React.FC<{ video: VideoResult }> = ({ video }) => (
@@ -75,23 +102,41 @@ const BlockCapsule: React.FC<{
     onReSearch: () => void;
     isLoading: boolean;
 }> = ({ block, isExpanded, onToggle, onReSearch, isLoading }) => {
-    const statusColors = {
+    const statusColors: Record<string, string> = {
         waiting: 'bg-gray-500/20 text-gray-400',
-        generating_query: 'bg-yellow-500/20 text-yellow-400',
+        analyzing: 'bg-purple-500/20 text-purple-400',
+        extracted: 'bg-cyan-500/20 text-cyan-400',
+        generating_queries: 'bg-purple-500/20 text-purple-400',
         searching: 'bg-blue-500/20 text-blue-400',
+        searching_specific: 'bg-blue-600/20 text-blue-300',
+        searching_entity: 'bg-indigo-500/20 text-indigo-400',
+        searching_variant: 'bg-yellow-500/20 text-yellow-500',
+        searching_broad: 'bg-orange-500/20 text-orange-400',
+        fallback: 'bg-orange-500/20 text-orange-400',
+        success: 'bg-green-500/20 text-green-400',
         complete: 'bg-green-500/20 text-green-400',
-        error: 'bg-red-500/20 text-red-400'
+        no_results: 'bg-red-500/20 text-red-400',
+        error: 'bg-red-500/20 text-red-500'
     };
 
-    const statusIcons = {
+    const statusIcons: Record<string, string> = {
         waiting: '⏸️',
-        generating_query: '🤖',
+        analyzing: '🧠',
+        extracted: '📋',
+        generating_queries: '🧠',
         searching: '🔍',
+        searching_specific: '🎯',
+        searching_entity: '👤',
+        searching_variant: '🔄',
+        searching_broad: '🌍',
+        fallback: '↩️',
+        success: '✅',
         complete: '✅',
+        no_results: '⚠️',
         error: '❌'
     };
 
-    const status = block.status || 'complete';
+    const status = block.status || 'waiting';
 
     return (
         <div className={`
@@ -116,15 +161,34 @@ const BlockCapsule: React.FC<{
                     <h4 className="text-sm font-medium text-white truncate">
                         {block.headline}
                     </h4>
-                    <p className="text-[10px] text-gray-500 font-mono truncate">
-                        🔍 "{block.searchQuery || '...'}"
-                    </p>
+                    {/* Final Query/Retry Info - Shown when we have results or are retrying */}
+                    {(block.videos?.length > 0 || (block.attemptNum && block.attemptNum > 1)) && (
+                        <div className="mt-1 text-[10px] flex items-center gap-2">
+                            {block.finalQuery && (
+                                <span className="text-emerald-400 opacity-90 font-mono">
+                                    Query: "{block.finalQuery}"
+                                </span>
+                            )}
+                        </div>
+                    )}
+                    {/* Fallback hidden specific query display if needed */}
+                    <div className="hidden">
+                        <p className="text-[10px] text-gray-500 font-mono truncate">
+                            🔍 "{block.searchQuery || '...'}"
+                        </p>
+                    </div>
                 </div>
 
                 {/* Status badge */}
-                <div className={`px-2 py-1 rounded-full text-[10px] font-medium flex items-center gap-1 shrink-0 ${statusColors[status]}`}>
-                    <span>{statusIcons[status]}</span>
-                    <span>{statusLabels[status] || 'Ready'}</span>
+                <div className={`px-2 py-1 rounded text-[10px] font-medium flex items-center gap-1 shrink-0 ${statusColors[status] || statusColors.waiting}`}>
+                    <span>{statusIcons[status] || statusIcons.waiting}</span>
+                    <span>{(statusLabels[status] || status || 'Ready').toUpperCase().replace(/_/g, ' ')}</span>
+                    {/* Show retry count if actively searching */}
+                    {(status.includes('searching') && block.maxAttempts && block.maxAttempts > 1) && (
+                        <span className="ml-1 opacity-75">
+                            ({block.attemptNum || 1}/{block.maxAttempts})
+                        </span>
+                    )}
                 </div>
 
                 {/* Expand arrow */}
@@ -177,87 +241,64 @@ const BlockCapsule: React.FC<{
     );
 };
 
-// HELPER: Status labels map
-const statusLabels: Record<string, string> = {
-    waiting: 'Waiting',
-    generating_query: 'AI thinking...',
-    searching: 'Searching...',
-    complete: 'Done',
-    error: 'Error'
-};
-
-// Enhanced Progress tracker with time estimation
+// Brain Activity Log Component
 const EnhancedProgressTracker: React.FC<{
     statuses: ProcessingStatus[];
     totalBlocks: number;
-    scriptContext?: string;
+    scriptContext: string;
 }> = ({ statuses, totalBlocks, scriptContext }) => {
-    const completedCount = statuses.filter(s => s.status === 'complete').length;
-    const progress = totalBlocks > 0 ? (completedCount / totalBlocks) * 100 : 0;
-
-    // Estimate: ~4 seconds per block
-    const remainingBlocks = totalBlocks - completedCount;
-    const estimatedSeconds = remainingBlocks * 4;
-
-    const currentBlockIndex = statuses.findIndex(s => s.status === 'generating_query' || s.status === 'searching');
-    const statusText = currentBlockIndex >= 0
-        ? `Processing Block ${currentBlockIndex + 1} of ${totalBlocks}...`
-        : completedCount === totalBlocks
-            ? 'All Done!'
-            : 'Initializing...';
 
     return (
-        <LiquidCard className="h-full flex flex-col justify-center min-h-[300px]">
-            <div className="text-center space-y-6 px-4">
-
-                {/* Circular or Large Progress Visual */}
-                <div className="relative w-full max-w-xs mx-auto">
-                    <div className="flex justify-between text-xs text-gray-400 mb-2">
-                        <span>Progress</span>
-                        <span>{Math.round(progress)}%</span>
-                    </div>
-                    <div className="h-3 bg-white/10 rounded-full overflow-hidden shadow-inner">
-                        <div
-                            className="h-full bg-gradient-to-r from-[#FF0055] via-[#FF6B35] to-[#FF0055] bg-[length:200%_100%] animate-gradient-x transition-all duration-500"
-                            style={{ width: `${progress}%` }}
-                        />
-                    </div>
-                </div>
-
-                {/* Status Text & Timer */}
-                <div className="space-y-2">
-                    <h3 className="text-xl font-medium text-white animate-pulse">
-                        {statusText}
-                    </h3>
-
-                    {remainingBlocks > 0 && (
-                        <div className="flex items-center justify-center gap-2 text-sm text-gray-500">
-                            <ClockIcon className="w-4 h-4" />
-                            <span>Estimated time left: ~{estimatedSeconds}s</span>
-                        </div>
-                    )}
-                </div>
-
-                {/* Current Activity Log (Mini) */}
-                <div className="max-w-xs mx-auto mt-4 p-3 rounded-xl bg-black/20 border border-white/5 text-left h-32 overflow-y-auto custom-scrollbar">
-                    <div className="text-[10px] text-gray-500 uppercase font-bold mb-2">Activity Log</div>
-                    {statuses.map((s, i) => (
-                        <div key={i} className={`text-xs mb-1.5 flex gap-2 ${s.status === 'searching' || s.status === 'generating_query' ? 'text-white' : 'text-gray-500'}`}>
-                            <span className="opacity-50 font-mono">#{i + 1}</span>
-                            <span className="truncate">
-                                {s.status === 'waiting' && 'Waiting...'}
-                                {s.status === 'generating_query' && 'Generating AI query...'}
-                                {s.status === 'searching' && `Searching: "${s.query || '...'}"`}
-                                {s.status === 'complete' && `Found ${s.videoCount} videos`}
-                            </span>
-                        </div>
-                    ))}
-                </div>
-
+        <LiquidCard className="bg-[#0A0A0A] border z-50 p-4 border-gray-800/50 shadow-2xl w-full h-full overflow-hidden flex flex-col" title="Brain Activity Log">
+            <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs text-gray-400">
+                    Processing {statuses.length} events...
+                </span>
                 {scriptContext && (
-                    <div className="text-xs text-gray-400 max-w-sm mx-auto border-t border-white/5 pt-4 mt-2">
-                        <span className="text-[#FF0055] font-bold">Context:</span> {scriptContext}
-                    </div>
+                    <span className="text-[10px] bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded-full border border-purple-500/20 truncate max-w-[200px]" title={scriptContext}>
+                        {scriptContext}
+                    </span>
+                )}
+            </div>
+
+            <div className={`overflow-y-auto flex-1 text-xs space-y-2 pr-1 custom-scrollbar scroll-smooth`}>
+                {statuses.length === 0 ? (
+                    <div className="text-gray-500 italic py-2">Ready to process script...</div>
+                ) : (
+                    statuses.slice().reverse().map((s, i) => (
+                        <div key={i} className="flex items-start gap-2 border-b border-gray-800/30 pb-2 last:border-0 last:pb-0 animate-in slide-in-from-right-2 duration-300">
+                            {/* Icon based on status */}
+                            <div className="mt-0.5 shrink-0">
+                                {s.status === 'complete' && <span className="text-green-500">✓</span>}
+                                {s.status === 'error' && <span className="text-red-500">✕</span>}
+                                {s.status.includes('searching') && <span className="text-blue-400 animate-pulse">•</span>}
+                                {s.status === 'generating_queries' && <span className="text-purple-400 animate-pulse">✦</span>}
+                                {s.status === 'waiting' && <span className="text-gray-600">◦</span>}
+                            </div>
+
+                            <div className="flex-1 min-w-0">
+                                <div className="text-gray-300 font-medium truncate">
+                                    <span className="text-gray-500 mr-2">#{s.blockIndex + 1}</span>
+                                    {statusLabels[s.status] || s.status}
+                                </div>
+                                {s.query && (
+                                    <div className="text-gray-500 truncate font-mono text-[10px] mt-0.5">
+                                        Query: <span className="text-gray-400">"{s.query}"</span>
+                                        {s.attemptNum && s.maxAttempts && s.maxAttempts > 1 && (
+                                            <span className="ml-1 text-orange-400">
+                                                (Attempt {s.attemptNum}/{s.maxAttempts})
+                                            </span>
+                                        )}
+                                    </div>
+                                )}
+                                {s.fallbackReason && (
+                                    <div className="text-red-400/70 text-[10px] mt-0.5 ml-2 border-l border-red-500/30 pl-2">
+                                        ↳ {s.fallbackReason}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    ))
                 )}
             </div>
         </LiquidCard>
@@ -273,6 +314,16 @@ export const VideoMatchingUI: React.FC<VideoMatchingUIProps> = ({ className = ''
     const [loadingBlocks, setLoadingBlocks] = useState<number[]>([]);
     const [processingStatuses, setProcessingStatuses] = useState<ProcessingStatus[]>([]);
     const [scriptContext, setScriptContext] = useState<string>('');
+    const eventSourceRef = useRef<EventSource | null>(null);
+
+    // Cleanup on unmount
+    useEffect(() => {
+        return () => {
+            if (eventSourceRef.current) {
+                eventSourceRef.current.close();
+            }
+        };
+    }, []);
 
     const handleFindVideos = async () => {
         if (!scriptText.trim()) return;
@@ -282,84 +333,132 @@ export const VideoMatchingUI: React.FC<VideoMatchingUIProps> = ({ className = ''
         setBlocks([]);
         setExpandedBlock(null);
         setScriptContext('');
+        setProcessingStatuses([]);
 
-        // Count expected blocks
-        const markerCount = (scriptText.match(/\[ON\s*SCREEN/gi) || []).length;
-
-        // Initialize processing statuses
-        const initialStatuses: ProcessingStatus[] = [];
-        for (let i = 0; i < markerCount; i++) {
-            initialStatuses.push({ blockIndex: i, status: 'waiting' });
+        // Close existing connection if any
+        if (eventSourceRef.current) {
+            eventSourceRef.current.close();
         }
-        setProcessingStatuses(initialStatuses);
-
-        // Simulate progress animation while waiting for server response
-        let currentBlock = 0;
-        const totalBlocks = markerCount;
-
-        // Timer simulation for UX
-        const progressInterval = setInterval(() => {
-            setProcessingStatuses(prev => {
-                const updated = [...prev];
-                // Only animate if we are within bounds and current block logic is sound
-                if (currentBlock < updated.length) {
-                    if (updated[currentBlock].status === 'waiting') {
-                        updated[currentBlock] = { ...updated[currentBlock], status: 'generating_query' };
-                    } else if (updated[currentBlock].status === 'generating_query') {
-                        updated[currentBlock] = { ...updated[currentBlock], status: 'searching' };
-                        // Move to next block logic would be handled by actual server stream usually, 
-                        // but here we are simulating "in progress" state until POST returns
-                        // We won't increment currentBlock too fast to avoid finishing before server returns
-                    }
-                }
-                return updated;
-            });
-            // Slowly advance blocks visually to simulate work
-            if (Math.random() > 0.6 && currentBlock < totalBlocks - 1) {
-                // Determine if we can move previous one to "searching" (simulated)
-                // In this POST-based simulation, we just keep the current one active
-                // Real data will overwrite this
-            }
-        }, 3000);
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/video-matching`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ script: scriptText })
-            });
-
-            clearInterval(progressInterval);
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(data.error || 'Failed to match videos');
-            }
-
-            // Update all statuses to complete with actual data
-            const finalStatuses = data.blocks.map((block: BlockWithVideos) => ({
-                blockIndex: block.index,
-                status: 'complete' as const,
-                query: block.searchQuery,
-                videoCount: block.videos.length
+            // Count expected blocks for initialization
+            const markerCount = (scriptText.match(/\[ON\s*SCREEN/gi) || []).length;
+            const initialStatuses: ProcessingStatus[] = Array(markerCount).fill(0).map((_, i) => ({
+                blockIndex: i,
+                status: 'waiting'
             }));
-            setProcessingStatuses(finalStatuses);
+            setProcessingStatuses(initialStatuses);
 
-            setBlocks(data.blocks);
-            setScriptContext(data.context || '');
+            // Connect to SSE stream
+            const url = `${API_BASE_URL}/api/video-matching/stream?script=${encodeURIComponent(scriptText)}`;
+            const eventSource = new EventSource(url);
+            eventSourceRef.current = eventSource;
 
-            // Small delay to show final status before hiding progress
-            await new Promise(resolve => setTimeout(resolve, 800));
+            eventSource.onmessage = (event) => {
+                const data = JSON.parse(event.data);
 
-            if (data.blocks.length > 0) {
-                setExpandedBlock(0);
-            }
+                if (data.type === 'context') {
+                    setScriptContext(data.context);
+                } else if (data.type === 'status') {
+                    // Update processing statuses log
+                    setProcessingStatuses(prev => {
+                        const newStatuses = [...prev];
+                        // Add new event entry for log functionality
+                        // We push distinct events to show history of retries
+                        if (data.status !== 'waiting') {
+                            // Limit log size
+                            if (newStatuses.length > 100) newStatuses.shift();
+                            newStatuses.push({
+                                blockIndex: data.blockIndex,
+                                status: data.status,
+                                query: data.query,
+                                videoCount: data.videoCount,
+                                attemptNum: data.attemptNum,
+                                maxAttempts: data.maxAttempts,
+                                fallbackReason: data.fallbackReason,
+                                queriesAttempted: data.queriesAttempted
+                            });
+                        }
+
+                        // Also update the initial "waiting" entry if it exists to reflect start
+                        const waitingIdx = newStatuses.findIndex(s => s.blockIndex === data.blockIndex && s.status === 'waiting');
+                        if (waitingIdx !== -1) {
+                            newStatuses.splice(waitingIdx, 1);
+                        }
+
+                        return newStatuses;
+                    });
+
+                    // Update block data
+                    setBlocks(prev => {
+                        // Initialize block if not exists (first status update)
+                        const blockIndex = data.blockIndex;
+                        const currentBlocks = [...prev];
+
+                        // Ensure array is large enough
+                        if (currentBlocks.length <= blockIndex) {
+                            // Fill gaps if any (shouldn't happen with correct indexing)
+                            while (currentBlocks.length <= blockIndex) {
+                                currentBlocks.push({
+                                    index: currentBlocks.length,
+                                    headline: 'Loading...',
+                                    text: '...',
+                                    searchQuery: '...',
+                                    videos: [],
+                                    status: 'waiting'
+                                });
+                            }
+                        }
+
+                        // Update specific block
+                        const block = currentBlocks[blockIndex];
+                        currentBlocks[blockIndex] = {
+                            ...block,
+                            status: data.status,
+                            searchQuery: data.query || block.searchQuery,
+                            finalQuery: data.status === 'complete' ? data.query : block.finalQuery,
+                            attemptNum: data.attemptNum,
+                            maxAttempts: data.maxAttempts,
+                            fallbackReasons: data.fallbackReason ? [...(block.fallbackReasons || []), data.fallbackReason] : block.fallbackReasons
+                        };
+
+                        return currentBlocks;
+                    });
+
+                } else if (data.type === 'block_complete') {
+                    // Update final block with full data including videos
+                    setBlocks(prev => {
+                        const updated = [...prev];
+                        updated[data.block.index] = {
+                            ...updated[data.block.index],
+                            ...data.block, // Overwrite with server source of truth
+                            status: 'complete',
+                            finalQuery: data.block.searchQuery // Ensure final query is set
+                        };
+                        return updated;
+                    });
+                } else if (data.type === 'complete') {
+                    // All done
+                    setBlocks(data.blocks);
+                    eventSource.close();
+                    setIsProcessing(false);
+                    if (data.blocks.length > 0) setExpandedBlock(0);
+                } else if (data.type === 'error') {
+                    setError(data.message);
+                    eventSource.close();
+                    setIsProcessing(false);
+                }
+            };
+
+            eventSource.onerror = (err) => {
+                console.error('SSE Error:', err);
+                setError('Connection lost. Please try again.');
+                eventSource.close();
+                setIsProcessing(false);
+            };
 
         } catch (err: any) {
-            clearInterval(progressInterval);
             setError(err.message);
-        } finally {
             setIsProcessing(false);
         }
     };

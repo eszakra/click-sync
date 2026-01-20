@@ -21,3 +21,10 @@ export interface GeminiSegmentResponse {
     end_time: number;
   }[];
 }
+
+export interface AlignedSegment {
+  title: string;
+  text?: string;
+  start_time: number;
+  end_time: number;
+}

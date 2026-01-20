@@ -1,6 +1,6 @@
 
 import { AssemblyWord } from './assemblyBackend';
-import { AlignedSegment } from './gemini';
+import { AlignedSegment } from '../types';
 
 // --- HELPER: String Similarity (Dice Coefficient / Bigram) ---
 // Good for catching typos or small differences (e.g. "colour" vs "color")
@@ -138,6 +138,11 @@ export const alignScriptDeterministic = async (
             startIndex = bestStartMatch.index;
         } else {
             console.warn(`Low confidence start for segment: ${seg.title}`);
+        }
+
+        // SAFETY CHECK: Prevent crash if script overrides audio length
+        if (!words[startIndex]) {
+            throw new Error(`Script/Audio Mismatch: Could not align segment "${seg.title}". The script text appears to contain content not present in the audio file.`);
         }
 
         // Update search Index so we search for END after START

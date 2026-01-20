@@ -1,23 +1,32 @@
 {
-  "name": "click-smartcuts",
+  "name": "click-sync",
+  "productName": "Click Sync",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "AI-Powered Video Matching & Audio Transcription Studio",
+  "author": "ClickSync Team",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "server": "node server.js",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron:dev": "concurrently \"npm run dev\" \"npm run server\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:build": "npm run build && electron-builder --win",
+    "electron:pack": "npm run build && electron-builder --dir",
+    "electron:publish": "npm run build && electron-builder --win --publish always"
   },
   "dependencies": {
     "@google/genai": "^1.34.0",
     "@google/generative-ai": "^0.24.1",
     "@heroicons/react": "^2.2.0",
-    "@supabase/supabase-js": "^2.89.0",
     "assemblyai": "^4.22.1",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
+    "electron-log": "^5.4.3",
+    "electron-updater": "^6.7.3",
     "express": "^5.2.1",
     "framer-motion": "^12.23.26",
     "gsap": "^3.14.2",
@@ -27,12 +36,82 @@
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "tailwind-merge": "^3.4.0",
+    "uuid": "^13.0.0",
     "wavesurfer.js": "^7.12.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.1.2",
+    "electron": "^33.4.0",
+    "electron-builder": "^25.1.8",
+    "electron-packager": "^17.1.2",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "wait-on": "^8.0.2"
+  },
+  "build": {
+    "appId": "com.clicksync.app",
+    "productName": "ClickSync",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "server.js",
+      "services/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "public/tray-icon.png",
+        "to": "assets/tray-icon.png"
+      },
+      {
+        "from": "uploads",
+        "to": "uploads",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "playwright-browsers",
+        "to": "playwright-browsers",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public/favicon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "public/favicon.ico",
+      "uninstallerIcon": "public/favicon.ico",
+      "installerHeaderIcon": "public/favicon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ClickSync"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "eszakra",
+        "repo": "click-sync"
+      }
+    ]
   }
 }

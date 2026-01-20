@@ -1,20 +1,20 @@
 
 import React, { ReactNode } from 'react';
 
-// -- CUSTOM GLASS CARD (User Request Adaptation) --
+// -- CUSTOM GLASS CARD (Optimized) --
 interface LiquidCardProps extends React.HTMLAttributes<HTMLDivElement> {
     children: ReactNode;
     title?: string;
-    rightElement?: ReactNode; // Kept matching App.tsx interface
+    rightElement?: ReactNode;
 }
 
-export const LiquidCard: React.FC<LiquidCardProps> = ({ children, className = '', title, rightElement, ...props }) => {
+export const LiquidCard = React.memo<LiquidCardProps>(({ children, className = '', title, rightElement, ...props }) => {
     return (
         <div
             className={`
             relative flex flex-col rounded-2xl border border-white/10 
-            bg-white/[0.02] backdrop-blur-xl shadow-xl 
-            transition-all duration-500 
+            bg-white/[0.02] backdrop-blur-md shadow-xl 
+            transition-all duration-300 transform-gpu
             hover:border-white/20 hover:shadow-2xl hover:bg-white/[0.04] 
             ${className}
         `}
@@ -38,20 +38,20 @@ export const LiquidCard: React.FC<LiquidCardProps> = ({ children, className = ''
                 {children}
             </div>
 
-            {/* Shine effect */}
+            {/* Shine effect (opacity only animation is cheap) */}
             <div className="absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-white/10 to-transparent opacity-50" />
         </div>
     );
-};
+});
 
 
-// -- CUSTOM BUTTON (User Request Adaptation) --
+// -- CUSTOM BUTTON (Optimized) --
 interface LiquidButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
     variant?: 'primary' | 'secondary' | 'ghost';
     isLoading?: boolean;
 }
 
-export const LiquidButton: React.FC<LiquidButtonProps> = ({
+export const LiquidButton = React.memo<LiquidButtonProps>(({
     children,
     variant = 'primary',
     isLoading,
@@ -60,7 +60,7 @@ export const LiquidButton: React.FC<LiquidButtonProps> = ({
     ...props
 }) => {
 
-    const baseStyle = "relative overflow-hidden transition-all duration-300 rounded-xl font-medium text-sm tracking-wide focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98]";
+    const baseStyle = "relative overflow-hidden transition-transform duration-200 rounded-xl font-medium text-sm tracking-wide focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98] transform-gpu";
 
     // Adapted to Magenta Theme
     const variants = {
@@ -77,43 +77,48 @@ export const LiquidButton: React.FC<LiquidButtonProps> = ({
         >
             {isLoading ? (
                 <div className="flex items-center justify-center gap-2">
-                    {/* Liquid Loader Small */}
+                    {/* Liquid Loader Small - CSS only */}
                     <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
                     <span>Processing...</span>
                 </div>
             ) : children}
         </button>
     );
-};
+});
 
-// -- TEXT AREA (Refined to match) --
-export const LiquidTextArea = ({ className = '', ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement>) => (
+// -- TEXT AREA (Optimized) --
+// Removed backdrop-blur-xl from global scope or specific usage if possible, but here it's standard input.
+// Note: Large textareas with backend blur are VERY expensive on repaint.
+export const LiquidTextArea = React.memo(({ className = '', ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement>) => (
     <div className="relative group">
         <textarea
-            className={`w-full bg-transparent text-gray-300 text-sm leading-relaxed p-4 rounded-xl border border-white/10 focus:border-[#FF0055]/50 focus:ring-0 outline-none transition-all resize-none placeholder-gray-700 font-mono focus:bg-white/[0.02] active:bg-transparent ${className}`}
+            className={`w-full bg-transparent text-gray-300 text-sm leading-relaxed p-4 rounded-xl border border-white/10 focus:border-[#FF0055]/50 focus:ring-0 outline-none transition-colors resize-none placeholder-gray-700 font-mono focus:bg-white/[0.02] active:bg-transparent ${className}`}
             style={{
                 minHeight: '200px',
                 backgroundImage: 'none'
             }}
             {...props}
         />
-        {/* Subtle Shine Bottom */}
+        {/* Subtle Shine Bottom - Opacity is cheap */}
         <div className="absolute bottom-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
     </div>
-);
+));
 
 // -- PROGRESS BAR --
-export const LiquidProgressBar = ({ progress }: { progress: number }) => (
+export const LiquidProgressBar = React.memo(({ progress }: { progress: number }) => (
     <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden mt-1">
         <div
-            className="h-full bg-[#FF0055] shadow-[0_0_15px_#FF0055] transition-all duration-500 ease-out"
-            style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
+            className="h-full bg-[#FF0055] shadow-[0_0_15px_#FF0055] transition-transform duration-500 ease-out origin-left"
+            style={{
+                transform: `scaleX(${Math.min(100, Math.max(0, progress)) / 100})`,
+                width: '100%'
+            }}
         />
     </div>
-);
+));
 
 // -- DROP ZONE --
-export const LiquidDropZone = ({
+export const LiquidDropZone = React.memo(({
     onFileSelect,
     accept,
     label,
@@ -131,7 +136,7 @@ export const LiquidDropZone = ({
             onClick={() => fileInputRef.current?.click()}
             className={`
                 relative overflow-hidden
-                border border-dashed rounded-xl p-8 text-center cursor-pointer transition-all duration-500
+                border border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors duration-300
                 group flex flex-col items-center justify-center gap-4
                 ${fileName
                     ? 'bg-[#FF0055]/5 border-[#FF0055]/30'
@@ -170,9 +175,6 @@ export const LiquidDropZone = ({
                     </div>
                 </>
             )}
-
-            {/* Shine effect */}
-            <div className="absolute top-0 left-0 w-full h-px bg-gradient-to-r from-transparent via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
         </div>
     );
-};
+});

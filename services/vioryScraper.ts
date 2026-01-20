@@ -5,33 +5,21 @@ export interface VideoResult {
     url: string;
     thumbnail: string;
     duration: string;
+    description?: string;
 }
 
-export class VioryScraper {
+class VioryScraper {
     private browser: Browser | null = null;
     private context: BrowserContext | null = null;
 
-    /**
-     * Initialize the browser instance
-     */
     async initialize(): Promise<void> {
         if (!this.browser) {
-            console.log('[VioryScraper] Launching browser...');
-            this.browser = await chromium.launch({
-                headless: true,
-                args: ['--no-sandbox', '--disable-setuid-sandbox']
-            });
-            this.context = await this.browser.newContext({
-                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            });
+            this.browser = await chromium.launch({ headless: true });
+            this.context = await this.browser.newContext();
             console.log('[VioryScraper] Browser initialized');
         }
     }
 
-    /**
-     * Search for videos on Viory.video
-     * IMPORTANT: Creates a NEW page for each search to ensure fresh results
-     */
     async searchVideos(query: string, maxResults: number = 6): Promise<VideoResult[]> {
         if (!this.context) {
             await this.initialize();
@@ -83,10 +71,7 @@ export class VioryScraper {
                         : '';
 
                     // Get the title from the sibling or nested element
-                    // The title is usually in an element after the card or inside it
                     let title = '';
-
-                    // Try to get title from various possible locations
                     const titleElement = await card.$('span, p, h3, h4, div.truncate');
                     if (titleElement) {
                         title = await titleElement.innerText() || '';
@@ -99,6 +84,17 @@ export class VioryScraper {
                             return nextEl ? nextEl.textContent?.trim() || '' : '';
                         });
                     }
+
+                    // Description extraction
+                    let description = '';
+                    description = await card.evaluate((el: Element) => {
+                        const parent = el.closest('div.grid') ? el.parentElement : null;
+                        if (parent) {
+                            const paragraphs = parent.querySelectorAll('p, span.text-sm');
+                            return Array.from(paragraphs).map(p => p.textContent).join(' ');
+                        }
+                        return '';
+                    });
 
                     // Extract duration from the card
                     let duration = '';
@@ -122,7 +118,8 @@ export class VioryScraper {
                             title: title || `Video ${i + 1}`,
                             url,
                             thumbnail,
-                            duration: duration || 'N/A'
+                            duration: duration || 'N/A',
+                            description: description.trim()
                         });
                     }
                 } catch (extractError) {
