@@ -29,5 +29,12 @@ contextBridge.exposeInMainWorld('electron', {
     },
     tray: {
         updateProgress: (data) => ipcRenderer.send('update-tray-progress', data)
-    }
+    },
+    // Auto-update and General IPC
+    invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
+    receive: (channel, func) => {
+        // Deliberately strip event as it includes `sender` 
+        ipcRenderer.on(channel, (event, ...args) => func(...args));
+    },
+    send: (channel, ...args) => ipcRenderer.send(channel, ...args)
 });
