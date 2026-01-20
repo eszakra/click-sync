@@ -705,6 +705,18 @@ function App() {
                 // Optionally show error toast
             });
 
+            electron.receive('update-status', (statusObj: any) => {
+                console.log("Update status:", statusObj);
+                setUpdateStatus((prev: any) => ({ ...prev, ...statusObj }));
+
+                // Auto-hide "latest" message after 3 seconds
+                if (statusObj.status === 'latest') {
+                    setTimeout(() => {
+                        setUpdateStatus((prev: any) => ({ ...prev, status: 'idle' }));
+                    }, 4000);
+                }
+            });
+
             // Initial check logic could go here if we wanted to auto-check on mount
             // electron.invoke('check-for-updates'); 
         }

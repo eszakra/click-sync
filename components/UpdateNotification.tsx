@@ -22,7 +22,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
     onDismiss
 }) => {
     // Only show for relevant statuses
-    const isVisible = ['available', 'downloading', 'ready'].includes(status);
+    const isVisible = ['available', 'downloading', 'ready', 'checking', 'latest'].includes(status);
 
     return (
         <AnimatePresence>
@@ -49,13 +49,22 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                                     {status === 'available' && <SparklesIcon className="w-5 h-5 text-[#00FF88]" />}
                                     {status === 'downloading' && <div className="w-4 h-4 rounded-full border-2 border-[#00FF88] border-t-transparent animate-spin" />}
                                     {status === 'ready' && <ArrowDownTrayIcon className="w-5 h-5 text-[#00FF88]" />}
+                                    {status === 'checking' && <div className="w-4 h-4 rounded-full border-2 border-gray-400 border-t-transparent animate-spin" />}
+                                    {status === 'latest' && <SparklesIcon className="w-5 h-5 text-gray-400" />}
                                 </div>
                                 <div>
-                                    <h4 className="text-white font-bold text-sm">Update Available {version && <span className="text-[#00FF88] text-xs px-1.5 py-0.5 rounded bg-[#00FF88]/10 ml-2">{version}</span>}</h4>
+                                    <h4 className="text-white font-bold text-sm">
+                                        {status === 'latest' ? 'Up to Date' :
+                                            status === 'checking' ? 'Checking for Updates...' :
+                                                `Update Available`}
+                                        {version && status !== 'checking' && status !== 'latest' && <span className="text-[#00FF88] text-xs px-1.5 py-0.5 rounded bg-[#00FF88]/10 ml-2">{version}</span>}
+                                    </h4>
                                     <p className="text-gray-400 text-xs mt-0.5">
                                         {status === 'available' && "A new version of ClickSync is available."}
                                         {status === 'downloading' && `Downloading... ${Math.round(progress)}%`}
                                         {status === 'ready' && "Download complete. Ready to install."}
+                                        {status === 'checking' && "Connecting to server..."}
+                                        {status === 'latest' && "You are using the latest version of ClickSync."}
                                     </p>
                                 </div>
                             </div>
