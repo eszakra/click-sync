@@ -13,7 +13,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowDownTrayIcon, PlayIcon, PauseIcon, ArrowPathIcon, SparklesIcon, ChevronDownIcon, ChevronUpIcon, FilmIcon, ArrowTopRightOnSquareIcon, BackwardIcon, ForwardIcon, InformationCircleIcon, Cog6ToothIcon, XCircleIcon, ClockIcon, ClipboardIcon } from '@heroicons/react/24/solid';
 import TitleBar from './components/TitleBar';
 import { ToastContainer, ToastMessage, ToastType } from './components/Toast';
+import { UpdateNotification } from './components/UpdateNotification';
 import { StartScreen } from './components/StartScreen';
+import { SettingsModal } from './components/SettingsModal';
 import { projectService, ProjectData } from './services/projectService';
 
 // --- Types ---
@@ -655,7 +657,6 @@ const ResultBlockItem: React.FC<{
 
 
 // --- Main App ---
-import { UpdateNotification } from './components/UpdateNotification';
 
 function App() {
     // State - Core Data
@@ -672,7 +673,12 @@ function App() {
 
     // UI State
     const [showSettings, setShowSettings] = useState(false);
-    const [apiKeyInput, setApiKeyInput] = useState('');
+    const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem('gemini_api_key') || '');
+
+    // Save API Key on change
+    useEffect(() => {
+        localStorage.setItem('gemini_api_key', apiKeyInput);
+    }, [apiKeyInput]);
 
     // --- PROJECT MANAGEMENT STATE ---
     const [currentView, setCurrentView] = useState<'start' | 'editor'>('start');
@@ -1452,6 +1458,14 @@ function App() {
                     onRename={projectService.renameProject}
                     onOpenSettings={() => setShowSettings(true)}
                 />
+
+                <SettingsModal
+                    isOpen={showSettings}
+                    onClose={() => setShowSettings(false)}
+                    apiKey={apiKeyInput}
+                    onApiKeyChange={setApiKeyInput}
+                    version="v1.0.9 Unified Studio"
+                />
             </>
         );
     }
@@ -1698,65 +1712,13 @@ function App() {
                 </div>
 
                 {/* SETTINGS MODAL */}
-                <AnimatePresence>
-                    {showSettings && (
-                        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
-                            <motion.div
-                                initial={{ opacity: 0 }}
-                                animate={{ opacity: 1 }}
-                                exit={{ opacity: 0 }}
-                                className="absolute inset-0 bg-black/80 backdrop-blur-md"
-                                onClick={() => setShowSettings(false)}
-                            />
-                            <motion.div
-                                initial={{ scale: 0.95, opacity: 0 }}
-                                animate={{ scale: 1, opacity: 1 }}
-                                exit={{ scale: 0.95, opacity: 0 }}
-                                className="relative bg-[#0A0A0A] border border-white/10 p-8 rounded-2xl w-full max-w-md shadow-2xl"
-                            >
-                                <h2 className="text-xl font-bold text-white mb-6">Application Settings</h2>
-
-                                <div className="space-y-4">
-                                    <div>
-                                        <label className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2 block">
-                                            Gemini API Key
-                                        </label>
-                                        <input
-                                            type="password"
-                                            value={apiKeyInput}
-                                            onChange={(e) => setApiKeyInput(e.target.value)}
-                                            placeholder="AIzaSy..."
-                                            className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white focus:border-[#FF0055] outline-none transition-colors font-mono"
-                                        />
-                                        <div className="flex justify-between items-center mt-2">
-                                            <p className="text-[10px] text-gray-500">
-                                                Key is saved locally in your user folder.
-                                            </p>
-                                            <p className="text-[10px] text-gray-600 font-mono">
-                                                v1.0.8 Unified Studio
-                                            </p>
-                                        </div>
-                                    </div>
-
-                                    <div className="flex justify-end gap-3 pt-4">
-                                        <button
-                                            onClick={() => setShowSettings(false)}
-                                            className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors"
-                                        >
-                                            Cancel
-                                        </button>
-                                        <button
-                                            onClick={updateApiKey}
-                                            className="px-6 py-2 bg-[#FF0055] hover:bg-[#FF1F69] text-white text-sm font-bold rounded-lg shadow-lg shadow-[#FF0055]/20 transition-all"
-                                        >
-                                            Save Changes
-                                        </button>
-                                    </div>
-                                </div>
-                            </motion.div>
-                        </div>
-                    )}
-                </AnimatePresence>
+                <SettingsModal
+                    isOpen={showSettings}
+                    onClose={() => setShowSettings(false)}
+                    apiKey={apiKeyInput}
+                    onApiKeyChange={setApiKeyInput}
+                    version="v1.0.9 Unified Studio"
+                />
             </div>
         </>
     );
