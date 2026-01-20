@@ -66,11 +66,20 @@ function createTray() {
     try {
         let iconPath;
         if (app.isPackaged) {
-            // In production, use the icon we copied to resources/assets using extraResources in package.json
-            iconPath = path.join(process.resourcesPath, 'assets/tray-icon.png');
+            // In production
+            // Use .ico for Windows if available for better resolution/compatibility
+            if (process.platform === 'win32') {
+                iconPath = path.join(process.resourcesPath, 'assets/icon.ico');
+            } else {
+                iconPath = path.join(process.resourcesPath, 'assets/tray-icon.png');
+            }
         } else {
             // In development, use public folder
             iconPath = path.join(__dirname, '../public/tray-icon.png');
+            if (process.platform === 'win32') {
+                // Try to use favicon.ico in dev if possible, but tray-icon.png is safer fallback if not copied
+                iconPath = path.join(__dirname, '../public/favicon.ico');
+            }
         }
 
         console.log('[Tray] Loading icon from:', iconPath);
