@@ -2,7 +2,7 @@
   "name": "click-sync",
   "productName": "Click Sync",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "AI-Powered Video Matching & Audio Transcription Studio",
   "author": "ClickSync Team",
   "type": "module",
@@ -110,7 +110,8 @@
       {
         "provider": "github",
         "owner": "eszakra",
-        "repo": "click-sync"
+        "repo": "click-sync",
+        "releaseType": "release"
       }
     ]
   }

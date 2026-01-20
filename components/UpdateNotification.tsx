@@ -28,12 +28,12 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
         <AnimatePresence>
             {isVisible && (
                 <motion.div
-                    initial={{ y: -100, opacity: 0 }}
-                    animate={{ y: 0, opacity: 1 }}
-                    exit={{ y: -100, opacity: 0 }}
-                    className="fixed top-8 left-1/2 -translate-x-1/2 z-[100] w-full max-w-md"
+                    initial={{ opacity: 0, x: 50, scale: 0.9 }}
+                    animate={{ opacity: 1, x: 0, scale: 1 }}
+                    exit={{ opacity: 0, x: 20, scale: 0.95 }}
+                    className="fixed top-24 right-6 z-[9000] w-full max-w-sm"
                 >
-                    <div className={`bg-[#111]/90 backdrop-blur-md border ${status === 'error' ? 'border-red-500/20' : 'border-[#00FF88]/20'} rounded-xl p-4 shadow-2xl flex flex-col gap-3 relative overflow-hidden`}>
+                    <div className={`bg-[#050505] backdrop-blur-xl border ${status === 'error' ? 'border-[#FF0055]/20 shadow-[0_0_20px_rgba(255,0,85,0.1)]' : 'border-green-500/20 shadow-[0_0_20px_rgba(34,197,94,0.1)]'} rounded-xl p-4 relative overflow-hidden group`}>
 
                         {/* Progress Bar Background */}
                         {status === 'downloading' && (
@@ -45,35 +45,35 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
 
                         <div className="flex items-start justify-between gap-4">
                             <div className="flex items-center gap-3">
-                                <div className={`w-10 h-10 rounded-full flex items-center justify-center border ${status === 'error' ? 'bg-red-500/10 border-red-500/20' : 'bg-[#00FF88]/10 border-[#00FF88]/20'}`}>
-                                    {status === 'available' && <SparklesIcon className="w-5 h-5 text-[#00FF88]" />}
-                                    {status === 'downloading' && <div className="w-4 h-4 rounded-full border-2 border-[#00FF88] border-t-transparent animate-spin" />}
-                                    {status === 'ready' && <ArrowDownTrayIcon className="w-5 h-5 text-[#00FF88]" />}
-                                    {status === 'checking' && <div className="w-4 h-4 rounded-full border-2 border-gray-400 border-t-transparent animate-spin" />}
-                                    {status === 'latest' && <SparklesIcon className="w-5 h-5 text-gray-400" />}
-                                    {status === 'error' && <XMarkIcon className="w-5 h-5 text-red-500" />}
+                                <div className="flex-shrink-0 mt-0.5">
+                                    {status === 'available' && <SparklesIcon className="w-6 h-6 text-green-500" />}
+                                    {status === 'downloading' && <div className="w-5 h-5 rounded-full border-2 border-green-500 border-t-transparent animate-spin" />}
+                                    {status === 'ready' && <ArrowDownTrayIcon className="w-6 h-6 text-green-500" />}
+                                    {status === 'checking' && <div className="w-5 h-5 rounded-full border-2 border-gray-500 border-t-transparent animate-spin" />}
+                                    {status === 'latest' && <SparklesIcon className="w-6 h-6 text-gray-400" />}
+                                    {status === 'error' && <XMarkIcon className="w-6 h-6 text-[#FF0055]" />}
                                 </div>
-                                <div>
-                                    <h4 className="text-white font-bold text-sm">
+                                <div className="flex-1 pt-0.5">
+                                    <h4 className="text-sm font-bold text-white mb-1">
                                         {status === 'latest' ? 'Up to Date' :
-                                            status === 'checking' ? 'Checking for Updates...' :
-                                                status === 'error' ? 'Update Check Failed' :
+                                            status === 'checking' ? 'Checking for Updates' :
+                                                status === 'error' ? 'Update Failed' :
                                                     `Update Available`}
-                                        {version && status !== 'checking' && status !== 'latest' && status !== 'error' && <span className="text-[#00FF88] text-xs px-1.5 py-0.5 rounded bg-[#00FF88]/10 ml-2">{version}</span>}
+                                        {version && status !== 'checking' && status !== 'latest' && status !== 'error' && <span className="text-green-500 text-xs px-1.5 py-0.5 rounded bg-green-500/10 ml-2">{version}</span>}
                                     </h4>
-                                    <p className="text-gray-400 text-xs mt-0.5">
+                                    <p className="text-xs font-medium text-gray-400 leading-relaxed">
                                         {status === 'available' && "A new version of ClickSync is available."}
                                         {status === 'downloading' && `Downloading... ${Math.round(progress)}%`}
                                         {status === 'ready' && "Download complete. Ready to install."}
-                                        {status === 'checking' && "Connecting to server..."}
-                                        {status === 'latest' && "You are using the latest version of ClickSync."}
+                                        {status === 'checking' && "Connecting to update server..."}
+                                        {status === 'latest' && "You are using the latest version."}
                                         {status === 'error' && (message || "Could not check for updates.")}
                                     </p>
                                 </div>
                             </div>
 
-                            <button onClick={onDismiss} className="text-gray-500 hover:text-white transition-colors">
-                                <XMarkIcon className="w-5 h-5" />
+                            <button onClick={onDismiss} className="flex-shrink-0 ml-4 text-gray-500 hover:text-white transition-colors">
+                                <XMarkIcon className="w-4 h-4" />
                             </button>
                         </div>
 

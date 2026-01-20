@@ -8,6 +8,8 @@ const log = require('electron-log');
 log.transports.file.level = 'info';
 autoUpdater.logger = log;
 autoUpdater.autoDownload = true; // Spotify-style: Download silently, then ask to restart
+autoUpdater.allowPrerelease = true; // Allow finding "Pre-releases" if GitHub marks them as such
+autoUpdater.allowPrerelease = true; // Allow finding "Pre-releases" if GitHub marks them as such
 
 // Keep a global reference of the window object
 let mainWindow;
