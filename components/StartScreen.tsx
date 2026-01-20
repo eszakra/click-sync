@@ -11,7 +11,7 @@ interface StartScreenProps {
     onResumeSession?: () => void;
     resumeProject?: ProjectData | null;
     onRename?: (id: string, newName: string) => void;
-    onOpenSettings?: () => void;
+    onOpenSettings: () => void;
 }
 
 export const StartScreen: React.FC<StartScreenProps> = ({
@@ -166,7 +166,6 @@ export const StartScreen: React.FC<StartScreenProps> = ({
                     </span>
                 </div>
 
-
                 {/* Primary Actions */}
                 <div className="space-y-3">
                     <button
@@ -176,19 +175,17 @@ export const StartScreen: React.FC<StartScreenProps> = ({
                         <PlusIcon className="w-5 h-5" />
                         <span className="font-bold text-sm tracking-wide">New Project</span>
                     </button>
-
-                    <button
-                        onClick={onOpenSettings}
-                        className="w-full flex items-center gap-3 px-4 py-3 bg-white/5 hover:bg-white/10 rounded-lg transition-all border border-white/5 hover:border-white/20 group"
-                    >
-                        <Cog6ToothIcon className="w-5 h-5 text-gray-400 group-hover:text-white transition-colors" />
-                        <span className="font-bold text-sm tracking-wide text-gray-400 group-hover:text-white transition-colors">Settings</span>
-                    </button>
                 </div>
 
                 <div className="flex-1" />
 
-                {/* Removed Version Footer */}
+                <button
+                    onClick={onOpenSettings}
+                    className="flex items-center gap-3 px-4 py-3 bg-white/5 hover:bg-white/10 rounded-lg transition-colors text-gray-400 hover:text-white group"
+                >
+                    <Cog6ToothIcon className="w-5 h-5 group-hover:rotate-90 transition-transform duration-500" />
+                    <span className="font-bold text-sm tracking-wide">Settings</span>
+                </button>
             </div>
 
             {/* MAIN CONTENT AREA */}

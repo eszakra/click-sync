@@ -2,7 +2,7 @@
   "name": "click-sync",
   "productName": "Click Sync",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "AI-Powered Video Matching & Audio Transcription Studio",
   "author": "ClickSync Team",
   "type": "module",
@@ -67,10 +67,6 @@
       "package.json"
     ],
     "extraResources": [
-      {
-        "from": "public/favicon.ico",
-        "to": "assets/icon.ico"
-      },
       {
         "from": "public/tray-icon.png",
         "to": "assets/tray-icon.png"

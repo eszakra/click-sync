@@ -66,9 +66,8 @@ function createTray() {
     try {
         let iconPath;
         if (app.isPackaged) {
-            // In production, use the icon we copied to resources/assets
+            // In production, use the icon we copied to resources/assets using extraResources in package.json
             iconPath = path.join(process.resourcesPath, 'assets/tray-icon.png');
-            console.log('[Tray] Production Icon Path:', iconPath);
         } else {
             // In development, use public folder
             iconPath = path.join(__dirname, '../public/tray-icon.png');
@@ -253,10 +252,6 @@ app.whenReady().then(async () => {
 
     // Create system tray
     // --- IPC HANDLERS for Auto Updates ---
-    ipcMain.handle('get-app-version', () => {
-        return app.getVersion();
-    });
-
     ipcMain.handle('check-for-updates', async () => {
         if (!isDev) {
             return autoUpdater.checkForUpdates();
