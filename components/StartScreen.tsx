@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { PlusIcon, TrashIcon, FilmIcon, ClockIcon, PencilIcon } from '@heroicons/react/24/solid';
+import { PlusIcon, TrashIcon, FilmIcon, ClockIcon, PencilIcon, Cog6ToothIcon } from '@heroicons/react/24/solid';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ProjectData, projectService } from '../services/projectService';
 
@@ -11,6 +11,7 @@ interface StartScreenProps {
     onResumeSession?: () => void;
     resumeProject?: ProjectData | null;
     onRename?: (id: string, newName: string) => void;
+    onOpenSettings?: () => void;
 }
 
 export const StartScreen: React.FC<StartScreenProps> = ({
@@ -20,7 +21,8 @@ export const StartScreen: React.FC<StartScreenProps> = ({
     onDeleteProject,
     onResumeSession,
     resumeProject,
-    onRename
+    onRename,
+    onOpenSettings
 }) => {
     const [deleteConfirm, setDeleteConfirm] = React.useState<{ show: boolean; project: ProjectData | null }>({ show: false, project: null });
     const [showResumeParams, setShowResumeParams] = React.useState(false);
@@ -164,6 +166,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
                     </span>
                 </div>
 
+
                 {/* Primary Actions */}
                 <div className="space-y-3">
                     <button
@@ -173,13 +176,19 @@ export const StartScreen: React.FC<StartScreenProps> = ({
                         <PlusIcon className="w-5 h-5" />
                         <span className="font-bold text-sm tracking-wide">New Project</span>
                     </button>
+
+                    <button
+                        onClick={onOpenSettings}
+                        className="w-full flex items-center gap-3 px-4 py-3 bg-white/5 hover:bg-white/10 rounded-lg transition-all border border-white/5 hover:border-white/20 group"
+                    >
+                        <Cog6ToothIcon className="w-5 h-5 text-gray-400 group-hover:text-white transition-colors" />
+                        <span className="font-bold text-sm tracking-wide text-gray-400 group-hover:text-white transition-colors">Settings</span>
+                    </button>
                 </div>
 
                 <div className="flex-1" />
 
-                <div className="text-[10px] text-gray-600 font-mono">
-                    v1.0.0 Unified Studio
-                </div>
+                {/* Removed Version Footer */}
             </div>
 
             {/* MAIN CONTENT AREA */}

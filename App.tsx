@@ -680,10 +680,16 @@ function App() {
     const [resumeableProject, setResumeableProject] = useState<ProjectData | null>(null);
     const [recentProjects, setRecentProjects] = useState<ProjectData[]>([]); // RESTORED
     const isRestoringRef = useRef(false);
+    const [appVersion, setAppVersion] = useState<string>("");
 
     // AUTO-UPDATE LISTENERS
     useEffect(() => {
         if ((window as any).electron) {
+            // Fetch Version
+            (window as any).electronAPI?.getAppVersion().then((ver: string) => {
+                setAppVersion(ver);
+            });
+
             const electron = (window as any).electron;
 
             // Listeners
@@ -1732,9 +1738,14 @@ function App() {
                                             placeholder="AIzaSy..."
                                             className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white focus:border-[#FF0055] outline-none transition-colors font-mono"
                                         />
-                                        <p className="text-[10px] text-gray-500 mt-2">
-                                            Key is saved locally in your user folder.
-                                        </p>
+                                        <div className="flex items-center justify-between mt-2">
+                                            <p className="text-[10px] text-gray-500">
+                                                Key is saved locally in your user folder.
+                                            </p>
+                                            <p className="text-[10px] text-gray-600 font-mono">
+                                                v{appVersion || "..."}
+                                            </p>
+                                        </div>
                                     </div>
 
                                     <div className="flex justify-end gap-3 pt-4">

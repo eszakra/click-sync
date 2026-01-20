@@ -252,6 +252,10 @@ app.whenReady().then(async () => {
 
     // Create system tray
     // --- IPC HANDLERS for Auto Updates ---
+    ipcMain.handle('get-app-version', () => {
+        return app.getVersion();
+    });
+
     ipcMain.handle('check-for-updates', async () => {
         if (!isDev) {
             return autoUpdater.checkForUpdates();
