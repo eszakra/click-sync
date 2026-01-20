@@ -22,7 +22,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
     onDismiss
 }) => {
     // Only show for relevant statuses
-    const isVisible = ['available', 'downloading', 'ready', 'checking', 'latest'].includes(status);
+    const isVisible = ['available', 'downloading', 'ready', 'checking', 'latest', 'error'].includes(status);
 
     return (
         <AnimatePresence>
@@ -33,7 +33,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                     exit={{ y: -100, opacity: 0 }}
                     className="fixed top-8 left-1/2 -translate-x-1/2 z-[100] w-full max-w-md"
                 >
-                    <div className="bg-[#111]/90 backdrop-blur-md border border-[#00FF88]/20 rounded-xl p-4 shadow-[0_0_30px_rgba(0,255,136,0.15)] flex flex-col gap-3 relative overflow-hidden">
+                    <div className={`bg-[#111]/90 backdrop-blur-md border ${status === 'error' ? 'border-red-500/20' : 'border-[#00FF88]/20'} rounded-xl p-4 shadow-2xl flex flex-col gap-3 relative overflow-hidden`}>
 
                         {/* Progress Bar Background */}
                         {status === 'downloading' && (
@@ -45,19 +45,21 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
 
                         <div className="flex items-start justify-between gap-4">
                             <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 rounded-full bg-[#00FF88]/10 flex items-center justify-center border border-[#00FF88]/20">
+                                <div className={`w-10 h-10 rounded-full flex items-center justify-center border ${status === 'error' ? 'bg-red-500/10 border-red-500/20' : 'bg-[#00FF88]/10 border-[#00FF88]/20'}`}>
                                     {status === 'available' && <SparklesIcon className="w-5 h-5 text-[#00FF88]" />}
                                     {status === 'downloading' && <div className="w-4 h-4 rounded-full border-2 border-[#00FF88] border-t-transparent animate-spin" />}
                                     {status === 'ready' && <ArrowDownTrayIcon className="w-5 h-5 text-[#00FF88]" />}
                                     {status === 'checking' && <div className="w-4 h-4 rounded-full border-2 border-gray-400 border-t-transparent animate-spin" />}
                                     {status === 'latest' && <SparklesIcon className="w-5 h-5 text-gray-400" />}
+                                    {status === 'error' && <XMarkIcon className="w-5 h-5 text-red-500" />}
                                 </div>
                                 <div>
                                     <h4 className="text-white font-bold text-sm">
                                         {status === 'latest' ? 'Up to Date' :
                                             status === 'checking' ? 'Checking for Updates...' :
-                                                `Update Available`}
-                                        {version && status !== 'checking' && status !== 'latest' && <span className="text-[#00FF88] text-xs px-1.5 py-0.5 rounded bg-[#00FF88]/10 ml-2">{version}</span>}
+                                                status === 'error' ? 'Update Check Failed' :
+                                                    `Update Available`}
+                                        {version && status !== 'checking' && status !== 'latest' && status !== 'error' && <span className="text-[#00FF88] text-xs px-1.5 py-0.5 rounded bg-[#00FF88]/10 ml-2">{version}</span>}
                                     </h4>
                                     <p className="text-gray-400 text-xs mt-0.5">
                                         {status === 'available' && "A new version of ClickSync is available."}
@@ -65,6 +67,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                                         {status === 'ready' && "Download complete. Ready to install."}
                                         {status === 'checking' && "Connecting to server..."}
                                         {status === 'latest' && "You are using the latest version of ClickSync."}
+                                        {status === 'error' && (message || "Could not check for updates.")}
                                     </p>
                                 </div>
                             </div>

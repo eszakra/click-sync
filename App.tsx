@@ -702,15 +702,23 @@ function App() {
 
             electron.receive('update-error', (err: any) => {
                 console.error("Update error:", err);
-                // Optionally show error toast
+                // Switch status to error to remove "Checking..." loader
+                setUpdateStatus((prev: any) => ({
+                    status: 'error',
+                    message: "Could not connect to update server."
+                }));
+                // Auto-hide error after 4 seconds
+                setTimeout(() => {
+                    setUpdateStatus((prev: any) => ({ ...prev, status: 'idle' }));
+                }, 4000);
             });
 
             electron.receive('update-status', (statusObj: any) => {
                 console.log("Update status:", statusObj);
                 setUpdateStatus((prev: any) => ({ ...prev, ...statusObj }));
 
-                // Auto-hide "latest" message after 3 seconds
-                if (statusObj.status === 'latest') {
+                // Auto-hide "latest" or "error" message after 3 seconds
+                if (statusObj.status === 'latest' || statusObj.status === 'error') {
                     setTimeout(() => {
                         setUpdateStatus((prev: any) => ({ ...prev, status: 'idle' }));
                     }, 4000);
