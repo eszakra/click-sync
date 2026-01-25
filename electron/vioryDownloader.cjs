@@ -66,7 +66,12 @@ class VioryDownloader {
             headless: this.isHeadless,
             channel: executablePath ? undefined : 'chromium',
             executablePath: executablePath,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage',
+                '--start-minimized'  // Start minimized to avoid showing about:blank
+            ]
         });
 
         this.context = await this.browser.newContext({
@@ -199,12 +204,8 @@ class VioryDownloader {
         console.log('[VioryDownloader] Starting smart login flow...');
 
         try {
-            // Go to videos page
-            // OPTIMIZED: Changed from networkidle/60000 to domcontentloaded/30000
-            // ORIGINAL: await this.page.goto('https://www.viory.video/en/videos', { waitUntil: 'networkidle', timeout: 60000 });
+            // Go to videos page to check login state
             await this.page.goto('https://www.viory.video/en/videos', { waitUntil: 'domcontentloaded', timeout: 30000 });
-            // OPTIMIZED: Reduced from 1500ms to 1000ms
-            // ORIGINAL: await this.page.waitForTimeout(1500);
             await this.page.waitForTimeout(1000);
 
             // Check if already logged in

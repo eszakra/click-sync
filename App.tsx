@@ -835,6 +835,10 @@ function App() {
     // UI State
     const [showSettings, setShowSettings] = useState(false);
     const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem('gemini_api_key') || '');
+    
+    // Viory Login State
+    const [vioryLoginRequired, setVioryLoginRequired] = useState(false);
+    const [vioryLoginMessage, setVioryLoginMessage] = useState('');
 
     // Save API Key on change
     useEffect(() => {
@@ -1700,6 +1704,27 @@ function App() {
         }
     }, []);
 
+    // Listen for Viory login status updates
+    useEffect(() => {
+        if ((window as any).electron) {
+            (window as any).electron.receive('viory-status-update', (status: { status: string, message: string }) => {
+                console.log('[App] Viory status update:', status);
+                
+                if (status.status === 'waiting_login' || status.status === 'login_required' || status.status === 'navigating_login') {
+                    setVioryLoginRequired(true);
+                    setVioryLoginMessage(status.message || 'Please log in to Viory in the browser window that opened');
+                } else if (status.status === 'logged_in' || status.status === 'ready') {
+                    setVioryLoginRequired(false);
+                    setVioryLoginMessage('');
+                }
+            });
+
+            return () => {
+                (window as any).electron.removeAllListeners('viory-status-update');
+            };
+        }
+    }, []);
+
     // --- Refs ---
     const wavesurferRef = useRef<any>(null);
     const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -2329,6 +2354,29 @@ function App() {
                     onOpenSettings={() => setShowSettings(true)}
                 />
 
+                {/* Viory Login Required Modal */}
+                {vioryLoginRequired && (
+                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center">
+                        <div className="bg-[#1a1a1a] rounded-2xl p-8 max-w-md mx-4 border border-white/10 shadow-2xl">
+                            <div className="flex items-center gap-3 mb-4">
+                                <div className="w-12 h-12 rounded-full bg-[#FF0055]/20 flex items-center justify-center">
+                                    <svg className="w-6 h-6 text-[#FF0055]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                    </svg>
+                                </div>
+                                <h2 className="text-xl font-bold text-white">Viory Login Required</h2>
+                            </div>
+                            <p className="text-gray-300 mb-6">
+                                {vioryLoginMessage || 'A browser window has opened. Please log in to your Viory account to continue.'}
+                            </p>
+                            <div className="flex items-center gap-3 p-4 bg-[#0a0a0a] rounded-xl">
+                                <div className="animate-spin w-5 h-5 border-2 border-[#FF0055] border-t-transparent rounded-full"></div>
+                                <span className="text-sm text-gray-400">Waiting for login...</span>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 <SettingsModal
                     isOpen={showSettings}
                     onClose={() => setShowSettings(false)}
@@ -2349,6 +2397,29 @@ function App() {
         <div className="min-h-screen bg-[#050505]">
             {/* TitleBar handled within EditorView */}
             <ToastContainer toasts={toasts} removeToast={removeToast} />
+
+            {/* Viory Login Required Modal */}
+            {vioryLoginRequired && (
+                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center">
+                    <div className="bg-[#1a1a1a] rounded-2xl p-8 max-w-md mx-4 border border-white/10 shadow-2xl">
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="w-12 h-12 rounded-full bg-[#FF0055]/20 flex items-center justify-center">
+                                <svg className="w-6 h-6 text-[#FF0055]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                </svg>
+                            </div>
+                            <h2 className="text-xl font-bold text-white">Viory Login Required</h2>
+                        </div>
+                        <p className="text-gray-300 mb-6">
+                            {vioryLoginMessage || 'A browser window has opened. Please log in to your Viory account to continue.'}
+                        </p>
+                        <div className="flex items-center gap-3 p-4 bg-[#0a0a0a] rounded-xl">
+                            <div className="animate-spin w-5 h-5 border-2 border-[#FF0055] border-t-transparent rounded-full"></div>
+                            <span className="text-sm text-gray-400">Waiting for login...</span>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Processing Overlay */}
             {procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error' && (

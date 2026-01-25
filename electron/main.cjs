@@ -691,6 +691,278 @@ async function startServer() {
     }
 }
 
+// Dedicated Viory Login Browser (separate from scraping browser)
+let vioryLoginBrowser = null;
+let vioryLoginContext = null;
+let vioryLoginPage = null;
+let isCheckingVioryLogin = false;
+
+/**
+ * Check Viory login status at startup using a SEPARATE browser
+ * This browser is ONLY for login detection and will be closed after login
+ * The scraping browser (vioryDownloader) is completely separate
+ * 
+ * Detection method:
+ * - NOT logged in: "Log in" and "Sign up" buttons visible in top-right header
+ * - LOGGED IN: Person/avatar icon visible in top-right header (circular button)
+ */
+async function checkVioryLoginAtStartup() {
+    if (isCheckingVioryLogin) return;
+    isCheckingVioryLogin = true;
+    
+    const userDataPath = app.getPath('userData');
+    const cookiesPath = path.join(userDataPath, 'viory-cookies.json');
+    
+    console.log('[VioryLogin] Starting login check at startup...');
+    
+    try {
+        // Get chromium path for packaged app
+        let executablePath = undefined;
+        try {
+            const appPath = path.dirname(process.execPath);
+            const chromiumPath = path.join(appPath, 'resources', 'playwright-browsers', 'chromium', 'chrome-win64', 'chrome.exe');
+            if (fs.existsSync(chromiumPath)) {
+                executablePath = chromiumPath;
+                console.log('[VioryLogin] Using bundled Chromium');
+            }
+        } catch (e) { /* Use system chromium */ }
+        
+        // Launch VISIBLE browser for login
+        const { chromium } = require('playwright');
+        vioryLoginBrowser = await chromium.launch({
+            headless: false,
+            channel: executablePath ? undefined : 'chromium',
+            executablePath: executablePath,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        });
+        
+        vioryLoginContext = await vioryLoginBrowser.newContext({
+            viewport: { width: 1280, height: 900 },
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        });
+        
+        vioryLoginPage = await vioryLoginContext.newPage();
+        
+        // Navigate to main Viory page (not signin - let user click Log in if needed)
+        console.log('[VioryLogin] Navigating to Viory main page...');
+        await vioryLoginPage.goto('https://www.viory.video/en/videos', { 
+            waitUntil: 'domcontentloaded', 
+            timeout: 30000 
+        });
+        
+        // Wait for page to fully render
+        console.log('[VioryLogin] Waiting for page to render...');
+        await vioryLoginPage.waitForTimeout(3000);
+        
+        // Handle cookie/content consent modal if it appears
+        await handleVioryConsentModal(vioryLoginPage);
+        await vioryLoginPage.waitForTimeout(2000);
+        
+        // Check if user is already logged in (no "Log in" text visible)
+        console.log('[VioryLogin] Checking initial login state...');
+        const isLoggedIn = await checkIfLoggedInByAvatar(vioryLoginPage);
+        
+        if (isLoggedIn) {
+            console.log('[VioryLogin] User is already logged in!');
+            await saveVioryLoginCookies();
+            await closeVioryLoginBrowser();
+            viorySessionStatus = { checked: true, valid: true, needsLogin: false };
+            if (mainWindow) {
+                mainWindow.webContents.send('viory-status-update', { status: 'logged_in', message: 'Already logged in to Viory' });
+            }
+            return;
+        }
+        
+        // Not logged in - show modal and wait for user to login
+        console.log('[VioryLogin] User is NOT logged in - "Log in" text found on page');
+        console.log('[VioryLogin] Waiting for user to log in...');
+        if (mainWindow) {
+            mainWindow.webContents.send('viory-status-update', { 
+                status: 'waiting_login', 
+                message: 'Please log in to Viory in the browser window' 
+            });
+        }
+        
+        // Poll for login - check every 2 seconds if "Log in" text disappears
+        const maxWaitTime = 5 * 60 * 1000; // 5 minutes
+        const pollInterval = 2000;
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < maxWaitTime) {
+            await vioryLoginPage.waitForTimeout(pollInterval);
+            
+            // Check if "Log in" text is gone (means user logged in)
+            const nowLoggedIn = await checkIfLoggedInByAvatar(vioryLoginPage);
+            
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            console.log(`[VioryLogin] Check #${Math.floor(elapsed/2)}: ${nowLoggedIn ? 'LOGGED IN!' : 'Still waiting...'}`);
+            
+            if (nowLoggedIn) {
+                console.log('[VioryLogin] Login detected - "Log in" text no longer visible!');
+                await saveVioryLoginCookies();
+                await closeVioryLoginBrowser();
+                viorySessionStatus = { checked: true, valid: true, needsLogin: false };
+                if (mainWindow) {
+                    mainWindow.webContents.send('viory-status-update', { status: 'logged_in', message: 'Successfully logged in to Viory' });
+                }
+                return;
+            }
+        }
+        
+        // Timeout
+        console.log('[VioryLogin] Login timeout');
+        await closeVioryLoginBrowser();
+        if (mainWindow) {
+            mainWindow.webContents.send('viory-status-update', { status: 'timeout', message: 'Login timeout - you can try again later' });
+        }
+        
+    } catch (error) {
+        console.error('[VioryLogin] Error:', error.message);
+        await closeVioryLoginBrowser();
+        if (mainWindow) {
+            mainWindow.webContents.send('viory-status-update', { status: 'error', message: error.message });
+        }
+    } finally {
+        isCheckingVioryLogin = false;
+    }
+}
+
+/**
+ * SIMPLE and RELIABLE login detection
+ * 
+ * Logic: If "Log in" text exists anywhere on the page → NOT logged in
+ *        If "Log in" text does NOT exist → LOGGED IN
+ * 
+ * This is the most reliable method because Viory always shows "Log in" button
+ * in the header when user is not logged in, and hides it when logged in.
+ */
+async function checkIfLoggedInByAvatar(page) {
+    try {
+        const result = await page.evaluate(() => {
+            // Get all text content from the page
+            const bodyText = document.body.innerText || '';
+            
+            // Simple check: Does "Log in" appear in the page?
+            // Viory shows "Log in" button in header when NOT logged in
+            const hasLoginText = bodyText.includes('Log in');
+            const hasSignUpText = bodyText.includes('Sign up');
+            
+            // If we see "Log in" or "Sign up", user is NOT logged in
+            if (hasLoginText || hasSignUpText) {
+                console.log('[VioryLogin] Found "Log in" or "Sign up" text - NOT logged in');
+                return false;
+            }
+            
+            // No "Log in" text found = user IS logged in
+            console.log('[VioryLogin] No "Log in" text found - user IS logged in');
+            return true;
+        });
+        
+        console.log('[VioryLogin] Login check result:', result ? 'LOGGED IN' : 'NOT LOGGED IN');
+        return result;
+    } catch (e) {
+        console.warn('[VioryLogin] Error checking login state:', e.message);
+        // On error, assume NOT logged in (safer)
+        return false;
+    }
+}
+
+/**
+ * Handle Viory's consent/cookie modal that appears on first visit
+ * Clicks "Proceed to watch all content" button to dismiss it
+ */
+async function handleVioryConsentModal(page) {
+    try {
+        console.log('[VioryLogin] Checking for consent modal...');
+        
+        // Try clicking with Playwright's click method (more reliable)
+        try {
+            // Look for "Proceed to watch all content" button
+            const proceedButton = await page.$('button:has-text("Proceed to watch all content")');
+            if (proceedButton) {
+                await proceedButton.click();
+                console.log('[VioryLogin] Clicked "Proceed to watch all content"');
+                await page.waitForTimeout(1500);
+                return;
+            }
+        } catch (e) { /* Button not found */ }
+        
+        try {
+            // Alternative: "Avoid explicit content" button
+            const avoidButton = await page.$('button:has-text("Avoid explicit content")');
+            if (avoidButton) {
+                await avoidButton.click();
+                console.log('[VioryLogin] Clicked "Avoid explicit content"');
+                await page.waitForTimeout(1500);
+                return;
+            }
+        } catch (e) { /* Button not found */ }
+        
+        // Fallback: use evaluate
+        const clicked = await page.evaluate(() => {
+            const buttons = document.querySelectorAll('button');
+            for (const btn of buttons) {
+                const text = (btn.textContent || '').trim();
+                if (text.includes('Proceed') || text.includes('proceed') || 
+                    text.includes('Avoid') || text.includes('Accept')) {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        });
+        
+        if (clicked) {
+            console.log('[VioryLogin] Consent modal dismissed via fallback');
+            await page.waitForTimeout(1500);
+        } else {
+            console.log('[VioryLogin] No consent modal found');
+        }
+    } catch (e) {
+        console.warn('[VioryLogin] Error handling consent modal:', e.message);
+    }
+}
+
+/**
+ * Save cookies from login browser
+ */
+async function saveVioryLoginCookies() {
+    try {
+        if (vioryLoginContext) {
+            const cookies = await vioryLoginContext.cookies();
+            const userDataPath = app.getPath('userData');
+            const cookiesPath = path.join(userDataPath, 'viory-cookies.json');
+            fs.writeFileSync(cookiesPath, JSON.stringify(cookies, null, 2));
+            console.log('[VioryLogin] Cookies saved successfully');
+        }
+    } catch (e) {
+        console.error('[VioryLogin] Failed to save cookies:', e.message);
+    }
+}
+
+/**
+ * Close the login browser (separate from scraping browser)
+ */
+async function closeVioryLoginBrowser() {
+    try {
+        if (vioryLoginPage) {
+            await vioryLoginPage.close().catch(() => {});
+            vioryLoginPage = null;
+        }
+        if (vioryLoginContext) {
+            await vioryLoginContext.close().catch(() => {});
+            vioryLoginContext = null;
+        }
+        if (vioryLoginBrowser) {
+            await vioryLoginBrowser.close().catch(() => {});
+            vioryLoginBrowser = null;
+        }
+        console.log('[VioryLogin] Login browser closed');
+    } catch (e) {
+        console.warn('[VioryLogin] Error closing browser:', e.message);
+    }
+}
+
 // This method will be called when Electron has finished initialization
 app.whenReady().then(async () => {
     // Start server
@@ -699,14 +971,32 @@ app.whenReady().then(async () => {
     // Create window
     createWindow();
 
-    // Check Viory session status (quick file check, no browser popup)
-    // Browser will only be initialized when user starts video matching
-    mainWindow.webContents.on('did-finish-load', () => {
-        console.log('[Main] Window loaded, checking Viory session status...');
+    // Check Viory session at startup (separate from video scraping)
+    mainWindow.webContents.on('did-finish-load', async () => {
+        console.log('[Main] Window loaded, checking Viory session...');
+        
+        // Quick file-based check first
         const hasSession = checkViorySessionQuick();
-        // Send status to renderer so UI can show login indicator if needed
-        mainWindow.webContents.send('viory-session-status', viorySessionStatus);
-        console.log('[Main] Viory session status:', viorySessionStatus);
+        console.log('[Main] Quick session check:', hasSession ? 'cookies found' : 'no cookies');
+        
+        if (!hasSession) {
+            // No cookies at all - need to login IMMEDIATELY (no delay)
+            console.log('[Main] No Viory session, starting login flow immediately...');
+            checkVioryLoginAtStartup();
+        } else {
+            // Has cookies - verify they're valid with a quick headless check
+            console.log('[Main] Cookies found, verifying session...');
+            const verifyResult = await verifyViorySessionSilent();
+            
+            if (verifyResult.valid) {
+                console.log('[Main] Viory session is valid!');
+                viorySessionStatus = { checked: true, valid: true, needsLogin: false };
+            } else {
+                // Cookies expired - need to login again (no delay)
+                console.log('[Main] Viory session expired, starting login flow...');
+                checkVioryLoginAtStartup();
+            }
+        }
     });
 
     // Create system tray
@@ -1718,20 +2008,10 @@ ipcMain.handle('smart-fetch-timeline', async (event, { blocks, scriptText }) => 
     // Attempt to load services but don't block if they fail (especially smartFetcher)
     await loadServices();
 
-    // 1. Initialize Downloader LAZILY - only shows browser if login needed
-    // Send status updates to the renderer
-    const vioryResult = await ensureVioryReadyLazy(
-        { minimizeAfterReady: true },
-        (status) => {
-            if (mainWindow) {
-                mainWindow.webContents.send('viory-status-update', status);
-            }
-        }
-    );
-    
-    if (!vioryResult.success) {
-        console.error('[IPC] Viory initialization failed:', vioryResult.error);
-        return { success: false, error: 'Failed to connect to Viory. Please try again.' };
+    // 1. Initialize Downloader - Simple and fast (login already done at app startup)
+    if (!vioryDownloader) {
+        vioryDownloader = new VioryDownloader();
+        await vioryDownloader.init();
     }
 
     // 2. Build Timeline
