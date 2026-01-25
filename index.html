@@ -4,6 +4,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Maximally permissive CSP to fix connectivity issues -->
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob: file:; img-src * data: blob: file:; media-src * data: blob: file:; connect-src * 'unsafe-inline' data: blob: file: http: https: ws: wss:;">
   <title>ClickSync</title>
   <link rel="icon" type="image/png"
     href="https://res.cloudinary.com/dx30xwfbj/image/upload/v1763703060/35536363463_q7rajl.png" />

@@ -1,3 +1,12 @@
+export interface AudioClip {
+  id: string;
+  buffer: AudioBuffer;
+  startTime: number;
+  offset: number;
+  duration: number;
+  volume?: number;
+}
+
 export interface Segment {
   id: string;
   title: string;

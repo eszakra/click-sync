@@ -1,6 +1,7 @@
 
 // import { processFullAudioPipeline } from './services/gemini';
 import JSZip from 'jszip';
+import { getAudioEngine } from './services/AudioSyncEngine';
 import { AlignedSegment } from './services/gemini';
 import { API_BASE_URL } from './services/config';
 import { alignScriptDeterministic } from './services/matcher';
@@ -17,6 +18,15 @@ import { UpdateNotification } from './components/UpdateNotification';
 import { StartScreen } from './components/StartScreen';
 import { SettingsModal } from './components/SettingsModal';
 import { projectService, ProjectData } from './services/projectService';
+import { EditorView } from './components/Editor/EditorView';
+// Backend services moved to Electron Main Process (IPC)
+// import timelineManager from './services/timeline/timelineManager.js';
+// import videoEditor from './services/videoEditor.js';
+// import smartVideoFetcher from './services/smartVideoFetcher.js';
+// @ts-ignore
+import config from './config.js';
+
+import { AudioClip } from './types';
 
 // --- Types ---
 interface VideoResult {
@@ -43,6 +53,7 @@ interface StoryBlock extends FinalSegment {
     videoStatus: 'idle' | 'searching' | 'complete' | 'error';
     videoMatches: VideoResult[];
     searchQuery?: string;
+    headline?: string;
     videoCount?: number;
     currentQueryMessage?: string; // Real-time search progress
     attemptsLog?: AttemptLog[];
@@ -52,6 +63,17 @@ interface ProcessingState {
     status: 'idle' | 'transcribing' | 'aligning' | 'slicing' | 'videomatching' | 'completed' | 'error';
     progress: number;
     message: string;
+}
+
+// Extend Window interface for Electron
+declare global {
+    interface Window {
+        electron: {
+            invoke: (channel: string, data?: any) => Promise<any>;
+            on: (channel: string, func: (...args: any[]) => void) => void;
+            removeAllListeners: (channel: string) => void;
+        };
+    }
 }
 
 // --- Internal UI Components ---
@@ -89,10 +111,10 @@ const SonicScrubber: React.FC<{
 
 const ProcessingHero: React.FC<{ state: ProcessingState }> = memo(({ state }) => {
     const steps = [
-        { id: 'transcribing', label: 'Analyzing Audio' },
-        { id: 'aligning', label: 'Aligning Script' },
-        { id: 'slicing', label: 'Precision Cutting' },
-        { id: 'videomatching', label: 'AI Video Matching' }
+        { id: 'transcribing', label: 'Audio' },
+        { id: 'aligning', label: 'Align' },
+        { id: 'slicing', label: 'Cut' },
+        { id: 'videomatching', label: 'Match' }
     ];
 
     const getCurrentStepIndex = () => {
@@ -104,58 +126,89 @@ const ProcessingHero: React.FC<{ state: ProcessingState }> = memo(({ state }) =>
 
     return (
         <motion.div
-            initial={{ opacity: 0, y: -20 }}
+            initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.3 }}
-            className={`p-6 rounded-2xl bg-gradient-to-r from-[#050505]/95 to-[#111]/95 border border-white/10 shadow-2xl relative overflow-hidden backdrop-blur-md` // Sticky removed from here, handled by wrapper
-            }
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.2 }}
+            className="rounded-xl bg-[#0C0C0E]/98 border border-white/[0.08] shadow-2xl backdrop-blur-xl overflow-hidden"
         >
-            {/* Background Glow - Rendered once */}
-            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-[#FF0055] to-transparent opacity-50" />
-
-            <div className="flex flex-col md:flex-row items-center justify-between gap-6 relative z-10">
-                <div className="flex items-center gap-4">
-                    <div className="relative">
-                        <div className="w-12 h-12 rounded-full bg-[#FF0055]/10 flex items-center justify-center border border-[#FF0055]/20">
-                            <SparklesIcon className="w-6 h-6 text-[#FF0055] animate-pulse" />
-                        </div>
-                        {/* Spinner Ring - CSS Animation */}
-                        <svg className="absolute inset-0 w-12 h-12 animate-spin-slow" viewBox="0 0 100 100">
-                            <circle cx="50" cy="50" r="48" fill="none" strokeWidth="2" stroke="#FF0055" strokeOpacity="0.3" strokeDasharray="40 100" />
-                        </svg>
-                    </div>
-
-                    <div>
-                        <h3 className="text-lg font-bold text-white tracking-tight">Processing Pipeline</h3>
-                        <p className="text-xs text-[#FF0055] font-mono uppercase tracking-widest">{state.message}</p>
-                    </div>
-                </div>
-
-                {/* Steps Visualizer */}
-                <div className="flex items-center gap-2">
-                    {steps.map((step, idx) => (
-                        <div key={step.id} className="flex items-center">
-                            <div className={`
-                w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold transition-all duration-500
-                ${idx < currentStep ? 'bg-[#FF0055] text-white' : idx === currentStep ? 'bg-white text-black scale-110 shadow-[0_0_15px_rgba(255,255,255,0.3)]' : 'bg-white/5 text-gray-600'}
-              `}>
-                                {idx + 1}
-                            </div>
-                            {idx < steps.length - 1 && (
-                                <div className={`w-8 h-0.5 transition-colors duration-500 ${idx < currentStep ? 'bg-[#FF0055]' : 'bg-white/5'}`} />
-                            )}
-                        </div>
-                    ))}
-                </div>
+            {/* Warning Banner */}
+            <div className="px-4 py-2 bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent border-b border-amber-500/10 flex items-center gap-2">
+                <svg className="w-3.5 h-3.5 text-amber-400" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                </svg>
+                <span className="text-[11px] text-amber-300/90 font-medium">Do not close or minimize the browser window</span>
             </div>
 
-            {/* Optimized Progress Bar - Transform instead of Width */}
-            <div className="mt-6 h-1 bg-white/5 rounded-full overflow-hidden">
-                <div
-                    className="h-full bg-gradient-to-r from-[#FF0055] to-[#FF5588] transition-transform duration-300 ease-out origin-left"
-                    style={{ transform: `scaleX(${state.progress / 100})`, width: '100%' }}
-                />
+            {/* Main Content */}
+            <div className="p-4">
+                <div className="flex items-center justify-between gap-6">
+                    {/* Left: Status */}
+                    <div className="flex items-center gap-3">
+                        <div className="relative w-10 h-10">
+                            <div className="absolute inset-0 rounded-full bg-[#FF0055]/10 flex items-center justify-center">
+                                <SparklesIcon className="w-5 h-5 text-[#FF0055]" />
+                            </div>
+                            <svg className="absolute inset-0 w-10 h-10 -rotate-90" viewBox="0 0 36 36">
+                                <circle cx="18" cy="18" r="16" fill="none" strokeWidth="2" stroke="rgba(255,255,255,0.05)" />
+                                <circle 
+                                    cx="18" cy="18" r="16" fill="none" strokeWidth="2" stroke="#FF0055" 
+                                    strokeDasharray={`${state.progress} 100`}
+                                    strokeLinecap="round"
+                                    className="transition-all duration-300"
+                                />
+                            </svg>
+                        </div>
+
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <h3 className="text-sm font-semibold text-white">Processing</h3>
+                                <span className="text-[10px] text-gray-500 font-mono">{state.progress.toFixed(0)}%</span>
+                            </div>
+                            <p className="text-xs text-[#FF6B7A]">{state.message}</p>
+                        </div>
+                    </div>
+
+                    {/* Right: Steps */}
+                    <div className="flex items-center gap-1">
+                        {steps.map((step, idx) => (
+                            <div key={step.id} className="flex items-center">
+                                <div 
+                                    className={`
+                                        flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold transition-all duration-300
+                                        ${idx < currentStep 
+                                            ? 'bg-[#FF0055]/20 text-[#FF0055]' 
+                                            : idx === currentStep 
+                                                ? 'bg-white text-black shadow-lg shadow-white/20' 
+                                                : 'bg-white/[0.03] text-gray-600'
+                                        }
+                                    `}
+                                    title={step.label}
+                                >
+                                    {idx < currentStep ? (
+                                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                        </svg>
+                                    ) : (
+                                        <span>{idx + 1}</span>
+                                    )}
+                                    <span className="hidden sm:inline">{step.label}</span>
+                                </div>
+                                {idx < steps.length - 1 && (
+                                    <div className={`w-4 h-0.5 mx-0.5 transition-colors duration-300 ${idx < currentStep ? 'bg-[#FF0055]/50' : 'bg-white/[0.05]'}`} />
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="mt-3 h-1 bg-white/[0.03] rounded-full overflow-hidden">
+                    <div
+                        className="h-full bg-gradient-to-r from-[#FF0055] to-[#FF5588] rounded-full transition-transform duration-300 ease-out origin-left"
+                        style={{ transform: `scaleX(${state.progress / 100})`, width: '100%' }}
+                    />
+                </div>
             </div>
         </motion.div>
     );
@@ -736,6 +789,45 @@ function App() {
     const [procState, setProcState] = useState<ProcessingState>({ status: 'idle', progress: 0, message: '' });
     const [expandedBlocks, setExpandedBlocks] = useState<Set<string>>(new Set());
     const [playingId, setPlayingId] = useState<string | null>(null);
+    // Toast IPC Listener
+    useEffect(() => {
+        if ((window as any).electron) {
+            (window as any).electron.receive('show-toast', (data: any) => {
+                addToast(data.message, data.type || 'info');
+            });
+        }
+    }, []);
+
+    const [masterAudioUrl, setMasterAudioUrl] = useState<string | null>(null);
+    const [audioClips, setAudioClips] = useState<AudioClip[]>([]);
+
+    // Track previous blob URLs for cleanup to prevent memory leaks
+    const previousBlobUrlsRef = useRef<string[]>([]);
+
+    // Cleanup blob URLs when masterAudioUrl changes or component unmounts
+    useEffect(() => {
+        return () => {
+            // Cleanup previous master URL
+            if (masterAudioUrl) {
+                URL.revokeObjectURL(masterAudioUrl);
+            }
+        };
+    }, [masterAudioUrl]);
+
+    // Cleanup storyBlock blob URLs when they change
+    useEffect(() => {
+        // Revoke previous blob URLs
+        previousBlobUrlsRef.current.forEach(url => {
+            if (url && url.startsWith('blob:')) {
+                URL.revokeObjectURL(url);
+            }
+        });
+
+        // Store current blob URLs for next cleanup
+        previousBlobUrlsRef.current = storyBlocks
+            .map(b => b.blobUrl)
+            .filter((url): url is string => !!url && url.startsWith('blob:'));
+    }, [storyBlocks]);
 
     // Update State
     const [updateStatus, setUpdateStatus] = useState<any>({ status: 'idle', progress: 0 });
@@ -750,10 +842,103 @@ function App() {
     }, [apiKeyInput]);
 
     // --- PROJECT MANAGEMENT STATE ---
-    const [currentView, setCurrentView] = useState<'start' | 'editor'>('start');
+    const [currentView, setCurrentView] = useState<'start' | 'editor' | 'smart_editor'>('start');
     const [currentProject, setCurrentProject] = useState<ProjectData | null>(null);
     const [resumeableProject, setResumeableProject] = useState<ProjectData | null>(null);
-    const [recentProjects, setRecentProjects] = useState<ProjectData[]>([]); // RESTORED
+    const [recentProjects, setRecentProjects] = useState<ProjectData[]>([]);
+
+    // Smart Editor State (Synced via IPC)
+    const [smartTimeline, setSmartTimeline] = useState<any[]>([]);
+
+    // Session Persistence Cache
+    // Map<projectId, { timeline: any[], audioUrl: string, audioFilePath: string, scriptText: string }>
+    const projectCache = useRef(new Map<string, any>());
+
+    // AUDIO FILE PATH STATE (Critical for Export)
+    const [audioFilePath, setAudioFilePath] = useState<string>('');
+
+    // --- RECOVERY LOGIC ---
+    useEffect(() => {
+        if ((window as any).electron) {
+            // Check for crashed session
+            (window as any).electron.invoke('smart-check-recovery').then((res: any) => {
+                if (res && res.found && res.data) {
+                    console.log('Found crashed session:', res.data.name);
+                    setResumeableProject(res.data);
+                }
+            });
+        }
+    }, []);
+
+    // Debounced Auto-Save for Crash Recovery
+    useEffect(() => {
+        // Only save if we have meaningful data to save
+        if (!currentProject) return;
+        if (!scriptText && smartTimeline.length === 0 && storyBlocks.length === 0) return;
+
+        const timer = setTimeout(() => {
+            if ((window as any).electron) {
+                const recoveryData = {
+                    ...currentProject,
+                    scriptText,
+                    storyBlocks, // CRITICAL: Include storyBlocks for full restoration
+                    smartTimeline, // Use consistent naming
+                    timeline: smartTimeline, // Keep for backward compatibility
+                    audioPath: audioFilePath || currentProject.audioPath, // Ensure audioPath is saved
+                    audioFilePath, // Also save with this key for compatibility
+                    audioUrl: masterAudioUrl,
+                    audioClips // Save clips too
+                };
+                console.log('[Recovery] Saving recovery data with', smartTimeline.length, 'segments');
+                (window as any).electron.invoke('smart-save-recovery', recoveryData);
+            }
+        }, 2000); // Save every 2s of inactivity
+
+        return () => clearTimeout(timer);
+    }, [currentProject, scriptText, smartTimeline, storyBlocks, audioFilePath, masterAudioUrl, audioClips]);
+
+    useEffect(() => {
+        if ((window as any).electron) {
+            (window as any).electron.receive('smart-timeline-update', (timelineData: any) => {
+                console.log("Received timeline update:", timelineData);
+                const backendSegments = timelineData.segments || [];
+
+                // CRITICAL: Merge backend updates while PRESERVING local approval states
+                setSmartTimeline(prev => {
+                    if (prev.length === 0) {
+                        // Initial load - use backend data as-is
+                        return backendSegments;
+                    }
+
+                    // Merge: Use backend video/status updates but preserve 'approved' status
+                    return backendSegments.map((backendSeg: any, idx: number) => {
+                        const localSeg = prev[idx];
+
+                        // If locally approved, KEEP that status regardless of backend
+                        if (localSeg && localSeg.status === 'approved') {
+                            return {
+                                ...backendSeg,
+                                status: 'approved' // Preserve local approval
+                            };
+                        }
+
+                        // Otherwise use backend data
+                        return backendSeg;
+                    });
+                });
+            });
+
+
+            (window as any).electron.receive('smart-progress', (data: any) => {
+                // Forward to toast or console for now
+                if (data.type === 'error') addToast('Smart Fetch Error', data.message, 'error');
+            });
+        }
+    }, []);
+    
+    // Track if "all videos ready" notification has been shown for current session
+    const allVideosReadyNotifiedRef = useRef(false);
+    
     const isRestoringRef = useRef(false);
 
     // AUTO-UPDATE LISTENERS
@@ -860,8 +1045,10 @@ function App() {
                     name: currentProject.name,
                     scriptText,
                     storyBlocks,
+                    smartTimeline, // CRITICAL: Save the timeline with video data
                     procState: safeState, // Only save safe states
-                    audioName: audioFile?.name
+                    audioName: audioFile?.name,
+                    audioPath: audioFilePath || currentProject.audioPath || '' // Use the saved audio path
                 });
             }, 2000);
             return () => clearTimeout(timeout);
@@ -884,98 +1071,479 @@ function App() {
     }, [procState, currentView, currentProject]);
 
 
-    const restoreProject = (proj: ProjectData) => {
+    const restoreProject = async (proj: ProjectData) => {
         console.log('[Restore] Restoring project:', proj.name);
+        console.log('[Restore] proj.storyBlocks count:', proj.storyBlocks?.length || 0);
+        console.log('[Restore] proj.audioPath:', proj.audioPath || 'N/A');
+        console.log('[Restore] First block sample:', proj.storyBlocks?.[0] ? {
+            title: proj.storyBlocks[0].title,
+            text: proj.storyBlocks[0].text?.substring(0, 50)
+        } : 'N/A');
 
         // ENABLE LOCK
         isRestoringRef.current = true;
 
         setCurrentProject(proj);
-        // Force string primitive to avoid "random things" object injection bugs
         setScriptText(typeof proj.scriptText === 'string' ? proj.scriptText : "");
-
-        // Deep clone storyBlocks to ensure re-render
-        if (proj.storyBlocks && Array.isArray(proj.storyBlocks) && proj.storyBlocks.length > 0) {
-            setStoryBlocks([...proj.storyBlocks]);
-        } else {
-            setStoryBlocks([]);
+        
+        // CRITICAL FIX: Set audioFilePath for export - this was missing!
+        if (proj.audioPath) {
+            console.log('[Restore] Setting audioFilePath:', proj.audioPath);
+            setAudioFilePath(proj.audioPath);
         }
 
-        // Restore Processing State & Sync Tray
-        if (proj.storyBlocks && proj.storyBlocks.length > 0) {
+        // 1. REGENERATE AUDIO BLOBS (Fix for expired blob:file:// URLs)
+        let restoredBlocks = [...(proj.storyBlocks || [])];
+        if (proj.audioPath && (window as any).electron) {
+            try {
+                console.log('[Restore] Regenerating audio blobs from:', proj.audioPath);
+                // Read file buffer from main process
+                const buffer = await (window as any).electron.invoke('read-file-buffer', proj.audioPath);
 
-            // CHECK FOR INCOMPLETE STATE
-            // If any block is NOT complete, or if the stored state was processing/videomatching
-            const hasIncompleteBlocks = proj.storyBlocks.some(b => b.videoStatus !== 'complete');
+                // Set Master Audio URL for Unified Player
+                if (buffer) {
+                    const masterBlob = new Blob([buffer], { type: 'audio/mpeg' }); // Fallback mime
+                    const masterUrl = URL.createObjectURL(masterBlob);
+                    setMasterAudioUrl(masterUrl);
 
-            if (hasIncompleteBlocks) {
-                console.log("[Restore] Detected incomplete blocks. Auto-Resuming...");
-                const script = typeof proj.scriptText === 'string' ? proj.scriptText : "";
-                setProcState({ status: 'videomatching', progress: 50, message: 'Resuming Search...' }); // Update UI immediately
+                    // Decode using the Unified Engine
+                    console.log('[Restore] Loading audio into AudioSyncEngine...');
+                    const engine = getAudioEngine();
+                    await engine.loadFromUrl(masterUrl);
+                    const decodedBuffer = engine.getAudioBuffer();
 
-                // Trigger Restart (with slight delay to allow state to settle)
-                setTimeout(() => {
-                    if (isCancelledRef.current) isCancelledRef.current = false; // Reset cancel flag
-                    // User requested FULL RESTART ("reiniciar todo") to avoid duplicates. 
-                    // We pass 'false' for skipReset to force a clean slate.
-                    matchVideosForBlocks(proj.storyBlocks, script, false);
-                }, 500);
+                    if (!decodedBuffer) throw new Error("AudioSyncEngine failed to decode buffer");
 
-            } else {
-                // All complete
-                const completedState = { status: 'completed' as const, progress: 100, message: 'Restored from Session' };
-                setProcState(completedState);
+                    // 2a. REGENERATE AUDIO CLIPS (NLE)
+                    const restoredClips: AudioClip[] = [];
+                    // We need to map blocks to clips.
+                    // Assuming blocks are in order and represent the segments.
+                    restoredBlocks.forEach((block, idx) => {
+                        const start = block.start_time;
+                        const end = block.end_time;
+                        const duration = end - start;
 
-                // FORCE TRAY SYNC
-                if ((window as any).electron?.tray) {
-                    (window as any).electron.tray.updateProgress({
-                        status: 'completed',
-                        progress: 100,
-                        message: 'Project Restored',
-                        activeProjects: 1
+                        if (duration > 0) {
+                            restoredClips.push({
+                                id: block.id, // Link ID
+                                buffer: decodedBuffer, // Reference Master Buffer
+                                startTime: start,
+                                offset: start, // Linear initially
+                                duration: duration,
+                                volume: 1.0
+                            });
+                        }
                     });
+                    setAudioClips(restoredClips);
+                    console.log('[Restore] AudioClips regenerated:', restoredClips.length);
+
+                    // Re-create blobs for each block (Legacy / Block Player support)
+                    restoredBlocks = await Promise.all(restoredBlocks.map(async (block) => {
+                        // Start/End are in seconds? Check interface.
+                        // AlignedSegment has start_time/end_time in seconds.
+                        // FinalSegment extends AlignedSegment.
+                        const start = block.start_time;
+                        const end = block.end_time;
+                        const duration = end - start;
+
+                        if (duration > 0) {
+                            const sliceBlob = await sliceAudioBuffer(decodedBuffer, start, end);
+                            const newUrl = URL.createObjectURL(sliceBlob);
+                            return { ...block, blobUrl: newUrl };
+                        }
+                        return block;
+                    }));
+                }
+                console.log('[Restore] Blobs regenerated successfully for', restoredBlocks.length, 'blocks');
+            } catch (e) {
+                console.error('[Restore] Failed to regenerate blobs:', e);
+                addToast('Audio Warning', 'Could not reload audio files. Previews may be silent.', 'warning');
+            }
+        }
+
+        setStoryBlocks(restoredBlocks);
+
+        // 2. RESTORE SMART TIMELINE
+        // Use saved smartTimeline if available (with video data), otherwise rebuild from blocks
+        // Handle both 'smartTimeline' and 'timeline' keys for backward compatibility with recovery data
+        const savedTimeline = proj.smartTimeline || proj.timeline || [];
+
+        if (savedTimeline.length > 0) {
+            console.log("[Restore] Using saved smartTimeline with", savedTimeline.length, "segments");
+
+            // CRITICAL FIX: Validate video files exist before restoring
+            // Videos are stored as file:// URLs - check if they still exist
+            let validatedTimeline = savedTimeline;
+            if ((window as any).electron) {
+                validatedTimeline = await Promise.all(savedTimeline.map(async (seg: any) => {
+                    if (seg.video && seg.video.url) {
+                        try {
+                            // Convert file:// URL to path for validation
+                            let videoPath = seg.video.url;
+                            if (videoPath.startsWith('file:///')) {
+                                videoPath = videoPath.replace('file:///', '');
+                            } else if (videoPath.startsWith('file://')) {
+                                videoPath = videoPath.replace('file://', '');
+                            }
+                            videoPath = decodeURIComponent(videoPath);
+
+                            // Check if file exists
+                            const exists = await (window as any).electron.invoke('check-file-exists', videoPath);
+                            if (!exists) {
+                                console.warn(`[Restore] Video file missing for segment ${seg.index}: ${videoPath}`);
+                                // Mark segment as needing re-download
+                                return {
+                                    ...seg,
+                                    video: null,
+                                    status: 'pending'
+                                };
+                            }
+                        } catch (e) {
+                            console.error('[Restore] Error validating video:', e);
+                            return { ...seg, video: null, status: 'pending' };
+                        }
+                    }
+                    return seg;
+                }));
+            }
+
+            setSmartTimeline(validatedTimeline);
+            setCurrentView('editor');
+
+            // Check if any segments need video processing (including ones we just invalidated)
+            const hasIncomplete = validatedTimeline.some((seg: any) =>
+                seg.status !== 'approved' && seg.status !== 'found' && !seg.video
+            );
+
+            if (hasIncomplete) {
+                console.log("[Restore] Some segments need processing, triggering Smart Fetch...");
+                if ((window as any).electron) {
+                    const scriptForBackend = typeof proj.scriptText === 'string' ? proj.scriptText : '';
+                    (window as any).electron.invoke('smart-fetch-timeline', {
+                        blocks: validatedTimeline,
+                        scriptText: scriptForBackend
+                    }).catch((err: any) => console.error('[Restore] Smart Fetch Error:', err));
+                }
+            }
+        } else if (restoredBlocks.length > 0) {
+            console.log("[Restore] No saved smartTimeline, rebuilding from storyBlocks...");
+
+            // Pre-populate Smart Timeline from storyBlocks
+            const initialSegments = restoredBlocks.map((block, idx) => ({
+                index: idx,
+                headline: block.title || `Segment ${idx + 1}`,
+                text: block.text || '',
+                duration: block.duration || 5,
+                start_time: block.start_time,
+                end_time: block.end_time,
+                startTime: restoredBlocks.slice(0, idx).reduce((acc, b) => acc + (b.duration || 5), 0),
+                status: block.videoStatus === 'complete' || block.videoMatches?.length > 0 ? 'found' : 'pending',
+                video: block.videoMatches && block.videoMatches.length > 0 ? {
+                    url: block.videoMatches[0].url,
+                    previewUrl: block.videoMatches[0].url,
+                    thumbnail: block.videoMatches[0].thumbnail,
+                    duration: block.videoMatches[0].duration,
+                    title: block.videoMatches[0].title
+                } : null
+            }));
+
+            setSmartTimeline(initialSegments);
+            setCurrentView('editor');
+
+            // Trigger video fetching for incomplete segments
+            const hasIncomplete = restoredBlocks.some(b => 
+                b.videoStatus !== 'complete' && (!b.videoMatches || b.videoMatches.length === 0)
+            );
+
+            if (hasIncomplete) {
+                console.log("[Restore] Needs processing. Triggering Smart Fetch with scriptText...");
+                if ((window as any).electron) {
+                    const scriptForBackend = typeof proj.scriptText === 'string' ? proj.scriptText : '';
+                    (window as any).electron.invoke('smart-fetch-timeline', {
+                        blocks: restoredBlocks,
+                        scriptText: scriptForBackend
+                    }).catch((err: any) => console.error('[Restore] Smart Fetch Error:', err));
                 }
             }
         } else {
-            setProcState({ status: 'idle', progress: 0, message: '' });
-            if ((window as any).electron?.tray) {
-                (window as any).electron.tray.updateProgress({ status: 'idle', progress: 0, message: 'Ready' });
-            }
-        }
-
-        // Reset interactive states
-        setExpandedBlocks(new Set());
-        setPlayingId(null);
-        setAudioFile(null);
-
-        // Logic for view navigation
-        if (proj.scriptText || (proj.storyBlocks && proj.storyBlocks.length > 0)) {
-            setCurrentView('editor');
-        } else {
+            // Default to start if empty
+            console.log("[Restore] No data to restore, going to start screen");
             setCurrentView('start');
         }
 
-        // RELEASE LOCK after state settles (1.5s safety buffer)
-        setTimeout(() => {
-            isRestoringRef.current = false;
-            console.log('[Restore] Lock released. Auto-save enabled.');
-        }, 1500);
+        // RELEASE LOCK - Use a small delay to ensure all state updates are flushed
+        // but not too long to cause data loss if user makes changes
+        await new Promise(resolve => setTimeout(resolve, 500));
+        isRestoringRef.current = false;
+        console.log('[Restore] Lock released.');
     };
 
-    const handleNewProject = async (name?: string) => {
-        // Use provided name or default to Project {Date} (Logic inside createNew or here)
-        // projectService.createNew() creates "Project {Date}" by default.
-        // We can override it.
+
+
+    const handleNewProject = async (name: string, audioFile: File, scriptText: string) => {
         const newProj = projectService.createNew();
-        if (name) newProj.name = name; // Override with user input
+        newProj.name = name; // Override with user input
+
+        // Clear cache for this new project ID just in case
+        if (projectCache.current.has(newProj.id)) {
+            projectCache.current.delete(newProj.id);
+        }
 
         await projectService.clearSession();
+        setResumeableProject(null); // Clear any resume prompt
         setCurrentProject(newProj);
-        setAudioFile(null);
-        setScriptText("");
+        setAudioFile(audioFile);
+        
+        let finalAudioPath = '';
+        
+        // Variable to hold the actual File object for processing
+        let audioFileForProcessing: File = audioFile;
+        
+        if (audioFile) {
+            // Check for native path first (from Electron dialog - like pro editors)
+            const nativePath = (audioFile as any).nativePath;
+            
+            if (nativePath) {
+                // PRO EDITOR STYLE: Use the original file path directly (no copying!)
+                console.log('[handleNewProject] Using native file path (pro editor style):', nativePath);
+                finalAudioPath = nativePath;
+                
+                // Read the file from disk for preview AND transcription
+                if ((window as any).electron) {
+                    try {
+                        const buffer = await (window as any).electron.invoke('read-file-buffer', nativePath);
+                        if (buffer) {
+                            // Create a proper File object with actual data for transcription
+                            const blob = new Blob([buffer], { type: 'audio/mpeg' });
+                            audioFileForProcessing = new File([blob], audioFile.name, { type: 'audio/mpeg' });
+                            (audioFileForProcessing as any).nativePath = nativePath;
+                            
+                            setMasterAudioUrl(URL.createObjectURL(blob));
+                            console.log('[handleNewProject] Audio loaded from native path, size:', buffer.byteLength);
+                        }
+                    } catch (e) {
+                        console.error('[handleNewProject] Failed to read audio for preview:', e);
+                    }
+                }
+            } else {
+                // Fallback: Web file input - need to save to disk
+                console.log('[handleNewProject] Web file input detected, saving to disk...');
+                setMasterAudioUrl(URL.createObjectURL(audioFile));
+                
+                if ((window as any).electron) {
+                    try {
+                        const arrayBuffer = await audioFile.arrayBuffer();
+                        const result = await (window as any).electron.invoke('save-audio-file', {
+                            arrayBuffer: arrayBuffer,
+                            fileName: audioFile.name,
+                            projectId: newProj.id
+                        });
+                        
+                        if (result.success && result.path) {
+                            finalAudioPath = result.path;
+                            console.log('[handleNewProject] Audio saved to:', finalAudioPath);
+                        }
+                    } catch (e) {
+                        console.error('[handleNewProject] Error saving audio file:', e);
+                    }
+                }
+            }
+            
+            setAudioFilePath(finalAudioPath);
+            setAudioFile(audioFileForProcessing); // Update with real file data
+            newProj.audioPath = finalAudioPath;
+            newProj.audioName = audioFile.name;
+        }
+        
+        setScriptText(scriptText);
         setStoryBlocks([]);
-        setProcState({ status: 'idle', progress: 0, message: '' });
+        setSmartTimeline([]);
+        setProcState({ status: 'transcribing', progress: 5, message: 'Initializing pipeline...' });
+
+        // Switch to Editor immediately (it will show processing state)
         setCurrentView('editor');
+
+        // Start Processing in background - use the file with actual data
+        processFullPipeline(audioFileForProcessing, scriptText);
+    };
+
+    const processFullPipeline = async (audio: File, script: string) => {
+        try {
+            // ========== STEP 1: TRANSCRIBE ==========
+            setProcState({ status: 'transcribing', progress: 10, message: 'Analyzing audio...' });
+            // addToast('Procesando', 'Iniciando análisis de audio...', 'info'); // Removed to reduce noise
+
+            const assemblyData = await transcribeWithAssembly(audio);
+            console.log('[Pipeline] Transcription complete:', assemblyData.words?.length, 'words');
+
+            // ========== STEP 2: DECODE ==========
+            setProcState({ status: 'aligning', progress: 30, message: 'Processing audio...' });
+
+            // UNIFIED: Use AudioSyncEngine
+            const engine = getAudioEngine();
+            // We need to ensure context is ready
+            await engine.loadFromFile(audio);
+            const decodedBuffer = engine.getAudioBuffer();
+
+            if (!decodedBuffer) {
+                throw new Error("Could not decode audio buffer");
+            }
+
+            // ========== STEP 3: ALIGN ==========
+            setProcState({ status: 'aligning', progress: 40, message: 'Syncing script...' });
+            const aligned = await alignScriptDeterministic(script, assemblyData.words);
+
+            if (!aligned || aligned.length === 0) {
+                throw new Error("Error de Alineación: Asegúrate de que el guión tenga marcadores [ON SCREEN: ...].");
+            }
+
+            // ========== STEP 4: SLICE ==========
+            setProcState({ status: 'slicing', progress: 50, message: 'Generating audio segments...' });
+            // addToast('Cortando', `Generando ${aligned.length} segmentos...`, 'info'); // Removed for cleaner UI
+
+            const processedBlocks: StoryBlock[] = [];
+
+            for (const [idx, segment] of aligned.entries()) {
+                let startTime = Math.max(0, segment.start_time);
+                let endTime = Math.min(decodedBuffer.duration, segment.end_time);
+
+                if (endTime > startTime) {
+                    const sliceBlob = await sliceAudioBuffer(decodedBuffer, startTime, endTime);
+                    const blobUrl = URL.createObjectURL(sliceBlob);
+                    const duration = endTime - startTime;
+
+                    processedBlocks.push({
+                        ...segment,
+                        blobUrl: blobUrl,
+                        duration: duration,
+                        id: `block-${idx}-${Date.now()}`,
+                        videoStatus: 'idle',
+                        videoMatches: [],
+                        videoCount: 0
+                    });
+                }
+            }
+
+            setStoryBlocks(processedBlocks);
+
+            // IMMEDIATE UI UPDATE: Populate Smart Timeline with "Audio Only" segments
+            // This ensures the timeline appears immediately, even before video matching
+            const initialSmartTimeline = processedBlocks.map((block, idx) => ({
+                index: idx,
+                headline: block.title || `Segment ${idx + 1}`,
+                text: block.text,
+                duration: block.duration,
+                startTime: block.start_time,
+                endTime: block.end_time, // CRITICAL: Required for timeline rendering
+                status: 'pending',
+                video: null, // No video yet
+                progress: 0
+            }));
+            setSmartTimeline(initialSmartTimeline);
+
+            // ========== STEP 5: FETCH VIDEOS ==========
+            setProcState({ status: 'videomatching', progress: 60, message: 'Searching for video footage...' });
+            // addToast('Searching Videos', 'Finding matching footage for your segments...', 'info'); // Redundant with Pipeline Overlay
+
+            if ((window as any).electron) {
+                const blocksForFetch = processedBlocks.map(block => ({
+                    title: block.title,
+                    headline: block.title, // Critical: Scraper expects 'headline' for query
+                    text: block.text,
+                    duration: block.duration,
+                    start_time: block.start_time,
+                    end_time: block.end_time
+                }));
+
+                const result = await (window as any).electron.invoke('smart-fetch-timeline', {
+                    blocks: blocksForFetch,
+                    scriptText: script
+                });
+
+                if (result && Array.isArray(result)) {
+                    const mergedTimeline = result.map((videoBlock: any, idx: number) => {
+                        const audioBlock = processedBlocks[idx];
+                        return {
+                            // Video data from scraper
+                            ...videoBlock,
+                            // CRITICAL: Preserve ALL audio block data (title, text, blobUrl, etc.)
+                            // These are from the AssemblyAI alignment and must take precedence
+                            title: audioBlock?.title || videoBlock.title || '',
+                            headline: audioBlock?.title || audioBlock?.headline || videoBlock.headline || '',
+                            text: audioBlock?.text || videoBlock.text || '',
+                            blobUrl: audioBlock?.blobUrl || null,
+                            duration: audioBlock?.duration || videoBlock.duration,
+                            start_time: audioBlock?.start_time,
+                            end_time: audioBlock?.end_time,
+                            index: idx // Ensure index is set
+                        };
+                    });
+                    setSmartTimeline(mergedTimeline);
+                }
+            }
+
+            setProcState({ status: 'completed', progress: 100, message: 'Processing Complete!' });
+            // addToast('Success', `Generated ${processedBlocks.length} segments successfully.`, 'success'); // Redundant with useEffect hook
+
+        } catch (e: any) {
+            console.error('[Pipeline Error]', e);
+            setProcState({ status: 'error', progress: 0, message: 'Processing failed' });
+            addToast('Error', e.message || 'An unexpected error occurred.', 'error');
+        }
+    };
+
+    const handleBackToStart = async () => {
+        // SAVE SESSION STATE TO MEMORY CACHE
+        if (currentProject) {
+            console.log('[Session] Caching project state for:', currentProject.name);
+            
+            // Update project with current audioPath
+            const updatedProject = {
+                ...currentProject,
+                audioPath: audioFilePath || currentProject.audioPath
+            };
+            
+            projectCache.current.set(currentProject.id, {
+                project: updatedProject,
+                storyBlocks,
+                smartTimeline,
+                scriptText,
+                audioFile,
+                audioFilePath,
+                procState,
+                audioClips,
+                masterAudioUrl
+            });
+            
+            // ALSO save to disk so it persists across app restarts
+            await projectService.saveSession({
+                id: currentProject.id,
+                name: currentProject.name,
+                scriptText,
+                storyBlocks,
+                smartTimeline, // CRITICAL: Save the timeline with video data
+                procState: { status: 'idle', progress: 0, message: '' },
+                audioName: audioFile?.name,
+                audioPath: audioFilePath || currentProject.audioPath || ''
+            });
+        }
+
+        setResumeableProject(null);
+        
+        // DON'T clear the session - we want to preserve it for reopening
+        // await projectService.clearSession(); // REMOVED
+
+        // RECOVERY LOGIC: Clear crash file on INTENTIONAL exit so next launch is clean
+        if ((window as any).electron) {
+            await (window as any).electron.invoke('smart-clear-recovery');
+        }
+
+        // DON'T reset state - keep it in memory for quick resume
+        // The cache will be used when reopening
+        // setSmartTimeline([]); // REMOVED
+        // setMasterAudioUrl(null); // REMOVED
+        setProcState({ status: 'idle', progress: 0, message: '' });
+        setCurrentView('start');
     };
 
     const handleDeleteProject = async (id: string) => {
@@ -1001,17 +1569,57 @@ function App() {
     }, [currentView]); // Reload when switching views to ensure freshness
 
     const handleOpenProject = async (proj: ProjectData) => {
-        // Smart Resume: If opening the exact same project that is currently in memory, just switch view
-        // This preserves the running process/background state without reloading
+        console.log('[handleOpenProject] Opening project:', proj.name, 'id:', proj.id);
+        
+        // Smart Resume: If opening the exact same project that is currently in memory
         if (currentProject && currentProject.id === proj.id) {
-            console.log("Resuming active project:", proj.name);
+            console.log("[handleOpenProject] Same project already active, just switching view");
+            // Make sure audioFilePath is set from cache if available
+            if (projectCache.current.has(proj.id)) {
+                const cached = projectCache.current.get(proj.id);
+                if (cached.audioFilePath && !audioFilePath) {
+                    console.log('[handleOpenProject] Restoring audioFilePath from cache:', cached.audioFilePath);
+                    setAudioFilePath(cached.audioFilePath);
+                }
+                if (cached.smartTimeline?.length > 0 && smartTimeline.length === 0) {
+                    console.log('[handleOpenProject] Restoring smartTimeline from cache');
+                    setSmartTimeline(cached.smartTimeline);
+                }
+                if (cached.masterAudioUrl && !masterAudioUrl) {
+                    console.log('[handleOpenProject] Restoring masterAudioUrl from cache');
+                    setMasterAudioUrl(cached.masterAudioUrl);
+                }
+            }
             setCurrentView('editor');
             return;
         }
 
-        // Otherwise, perform full load
-        await projectService.openProject(proj);
-        restoreProject(proj);
+        // Check Memory Cache
+        if (projectCache.current.has(proj.id)) {
+            console.log("[handleOpenProject] Restoring from Memory Cache:", proj.name);
+            const cached = projectCache.current.get(proj.id);
+
+            setCurrentProject(cached.project);
+            setStoryBlocks(cached.storyBlocks);
+            setSmartTimeline(cached.smartTimeline);
+            setScriptText(cached.scriptText);
+            setAudioFile(cached.audioFile);
+            setAudioFilePath(cached.audioFilePath);
+            setProcState(cached.procState);
+            setAudioClips(cached.audioClips);
+            setMasterAudioUrl(cached.masterAudioUrl);
+
+            console.log('[handleOpenProject] Cache restored - audioFilePath:', cached.audioFilePath);
+            console.log('[handleOpenProject] Cache restored - smartTimeline segments:', cached.smartTimeline?.length || 0);
+
+            setCurrentView('editor');
+            return;
+        }
+
+        // Otherwise, perform full load from disk
+        console.log('[handleOpenProject] No cache found, loading from disk');
+        const fullProject = await projectService.openProject(proj);
+        restoreProject(fullProject);
     };
 
     // Helper: Generate project title from script content
@@ -1031,17 +1639,7 @@ function App() {
         return preview || `Project ${new Date().toLocaleDateString()}`;
     };
 
-    const handleBackToStart = async () => {
-        if (currentProject) {
-            await projectService.saveSession({
-                id: currentProject.id,
-                name: currentProject.name,
-                scriptText,
-                storyBlocks
-            });
-        }
-        setCurrentView('start');
-    };
+
 
     // Toggle block expansion
     const toggleBlockExpansion = useCallback((blockId: string) => {
@@ -1081,55 +1679,87 @@ function App() {
         }
     };
 
+    const [viewMode, setViewMode] = useState<'dashboard' | 'editor'>('dashboard');
+    const [projectLogs, setProjectLogs] = useState<string[]>([]);
+    const [currentTimeline, setCurrentTimeline] = useState<any>(null); // Ideally should have a proper Timeline type
+
+    // Listen for backend logs
+    useEffect(() => {
+        if ((window as any).electron) {
+            // Use 'receive' which is designed for simple message passing
+            (window as any).electron.receive('smart-log', (msg: string) => {
+                // Add timestamp when log is received (not at render time)
+                const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false }).slice(0, 5);
+                const logWithTime = `[${timestamp}] ${msg}`;
+                setProjectLogs(prev => [...prev.slice(-100), logWithTime]); // Keep last 100 logs
+            });
+
+            return () => {
+                (window as any).electron.removeAllListeners('smart-log');
+            };
+        }
+    }, []);
+
     // --- Refs ---
+    const wavesurferRef = useRef<any>(null);
     const audioRef = useRef<HTMLAudioElement | null>(null);
 
     // --- Effects ---
 
-    // Completion Notification
-    useEffect(() => {
-        if (procState.status === 'completed') {
+    /**
+     * Play a notification sound (pleasant chime)
+     */
+    const playNotificationSound = useCallback(() => {
+        try {
+            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const now = ctx.currentTime;
+            
+            // Create a pleasant two-tone chime
+            const playTone = (freq: number, start: number, duration: number) => {
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.frequency.value = freq;
+                osc.type = 'sine';
+                gain.gain.setValueAtTime(0.3, now + start);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + start + duration);
+                osc.start(now + start);
+                osc.stop(now + start + duration);
+            };
+            
+            // Two-tone chime (C5 and E5)
+            playTone(523.25, 0, 0.15);    // C5
+            playTone(659.25, 0.1, 0.2);   // E5
+        } catch (err) {
+            console.error("Notification sound failed:", err);
+        }
+    }, []);
 
-            // SKIP Notification if just restored
-            if (procState.message.includes('Restored')) {
-                return;
-            }
+    /**
+     * Show a system notification with sound
+     * @param title - Notification title
+     * @param body - Notification body text
+     */
+    const showNotification = useCallback((title: string, body: string) => {
+        console.log('[Notification] Showing:', title, body);
+        
+        // 1. Play notification sound
+        playNotificationSound();
 
-            // 1. Audio Notification (Text-to-Speech)
-            try {
-                // Cancel any potentially playing speech first
-                window.speechSynthesis.cancel();
-
-                const utterance = new SpeechSynthesisUtterance("Task Completed");
-                utterance.lang = 'en-US'; // Ensure English as requested
-                utterance.volume = 1.0;
-                utterance.rate = 1.0;
-                utterance.pitch = 1.0;
-
-                window.speechSynthesis.speak(utterance);
-            } catch (e) {
-                console.warn("Speech synthesis failed:", e);
-                // Fallback beep if speech fails
-                try {
-                    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-                    const osc = ctx.createOscillator();
-                    osc.connect(ctx.destination);
-                    osc.frequency.value = 880;
-                    osc.start();
-                    osc.stop(0.2);
-                } catch (err) {
-                    console.error("Fallback audio failed:", err);
-                }
-            }
-
-            // 2. System Notification
+        // 2. System Notification - Use Electron's native notification if available
+        if ((window as any).electron) {
+            // Use Electron IPC to show native notification with proper icon
+            (window as any).electron.invoke('show-notification', { title, body })
+                .catch((e: any) => console.error("Electron notification failed:", e));
+        } else {
+            // Fallback to browser notification
             const showSystemNotification = () => {
                 if ("Notification" in window) {
                     try {
-                        new Notification("Task Completed!", {
-                            body: "The video matching process has finished successfully.",
-                            icon: "/favicon.ico",
-                            silent: true // We handle sound manually
+                        new Notification(title, {
+                            body: body,
+                            silent: true
                         });
                     } catch (e) {
                         console.error("Notification creation failed:", e);
@@ -1148,11 +1778,47 @@ function App() {
                     });
                 }
             }
+        }
+    }, [playNotificationSound]);
 
-            // 3. In-App Toast (Extra visibility)
-            addToast('Success', 'Task Completed! All segments are ready.', 'success');
+    // Reset notification flag when starting new processing
+    useEffect(() => {
+        if (procState.status === 'videomatching' || procState.status === 'slicing') {
+            allVideosReadyNotifiedRef.current = false;
         }
     }, [procState.status]);
+    
+    // Detect when ALL segments have videos ready and show notification
+    useEffect(() => {
+        // Only check if we have segments and haven't notified yet
+        if (smartTimeline.length === 0 || allVideosReadyNotifiedRef.current) {
+            return;
+        }
+        
+        // Check if ALL segments have a video with a valid path/url (status 'ready' or has video)
+        const allReady = smartTimeline.every((seg: any) => {
+            // A segment is ready if it has video data with a path or previewUrl
+            const hasVideo = seg.video && (seg.video.path || seg.video.previewUrl || seg.video.url);
+            const isReady = seg.status === 'ready' || seg.status === 'approved';
+            return hasVideo || isReady;
+        });
+        
+        // Also make sure we're not still in the middle of processing
+        const stillProcessing = smartTimeline.some((seg: any) => 
+            seg.status === 'searching' || seg.status === 'pending' || seg.status === 'downloading'
+        );
+        
+        if (allReady && !stillProcessing) {
+            console.log('[Notification] All videos ready! Showing notification...');
+            allVideosReadyNotifiedRef.current = true;
+            
+            showNotification(
+                'ClickSync - Videos Ready',
+                'All video clips have been found and are ready for review.'
+            );
+            addToast('Videos Ready', 'All video clips have been found. Review and export when ready.', 'success');
+        }
+    }, [smartTimeline, showNotification]);
 
     // Toast State
     const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -1186,6 +1852,10 @@ function App() {
 
     const handleAudioSelect = useCallback((file: File) => {
         setAudioFile(file);
+        // Store path for Electron/FFmpeg
+        if ((file as any).path) {
+            setAudioFilePath((file as any).path);
+        }
         // Reset blocks when new audio selected?
         setProcState({ status: 'idle', progress: 0, message: '' });
     }, []);
@@ -1232,7 +1902,16 @@ function App() {
 
             // 3. Slice (Voiceover Pipeline)
             setProcState({ status: 'slicing', progress: 50, message: 'Rendering Precision Audio Cuts...' });
-            const decodedBuffer = await decodeAudio(audioFile);
+
+            // UNIFIED: Use AudioSyncEngine
+            const engine = getAudioEngine();
+            // Reload from file to ensure engine has the correct buffer for this new process
+            await engine.loadFromFile(audioFile);
+            const decodedBuffer = engine.getAudioBuffer();
+
+            if (!decodedBuffer) {
+                throw new Error("Could not decode audio buffer");
+            }
             const processedBlocks: StoryBlock[] = [];
 
             if (isCancelledRef.current) return;
@@ -1245,11 +1924,13 @@ function App() {
                     const sliceBlob = await sliceAudioBuffer(decodedBuffer, segment.start_time, segment.end_time);
                     const url = URL.createObjectURL(sliceBlob);
 
+                    const blockId = `block-${idx}-${Date.now()}`;
+
                     processedBlocks.push({
                         ...segment,
                         blobUrl: url,
                         duration: segment.end_time - segment.start_time,
-                        id: `block-${idx}-${Date.now()}`,
+                        id: blockId,
                         videoStatus: 'idle',
                         videoMatches: [],
                         videoCount: 0
@@ -1257,7 +1938,34 @@ function App() {
                 }
             }
 
+            // GENERATE AUDIOCLIPS (NLE)
+            const generatedClips: AudioClip[] = processedBlocks.map(block => ({
+                id: block.id,
+                buffer: decodedBuffer, // Shared Master Buffer Reference
+                startTime: block.start_time,
+                offset: block.start_time,
+                duration: block.duration,
+                volume: 1.0
+            }));
+            console.log('[App] Generated Clips:', generatedClips.length, generatedClips);
+            setAudioClips(generatedClips);
+
+            // Pass to Engine immediately
+            engine.setClips(generatedClips);
+
             setStoryBlocks(processedBlocks);
+
+            // Fix: Update Smart Timeline immediately so EditorView has data (including blobUrls)
+            setSmartTimeline(processedBlocks.map((block, idx) => ({
+                index: idx,
+                headline: block.title || `Segment ${idx + 1}`,
+                text: '',
+                duration: block.duration,
+                startTime: block.start_time,
+                status: 'pending',
+                video: null,
+                blobUrl: block.blobUrl
+            })));
 
             // Title will be generated AFTER the summary is created during video matching
 
@@ -1279,6 +1987,7 @@ function App() {
                     message: 'Processing complete!'
                 });
             }
+            // Note: "Videos Ready" notification is handled by useEffect watching smartTimeline
 
         } catch (error: any) {
             if (!isCancelledRef.current) {
@@ -1505,10 +2214,102 @@ function App() {
         }
     };
 
+
+    // Audio Clip Update Handler
+    const handleUpdateAudioClip = useCallback((id: string, updates: Partial<AudioClip>) => {
+        setAudioClips(prev => {
+            const next = prev.map(clip => clip.id === id ? { ...clip, ...updates } : clip);
+            // Updating the engine in real-time for smooth feedback
+            getAudioEngine().setClips(next);
+            return next;
+        });
+    }, []);
+
+    // --- SMART EDITOR INTEGRATION ---
+    const handleOpenSmartEditor = () => {
+        // 1. Pre-populate timeline from storyBlocks IMMEDIATELY
+        const initialSegments = storyBlocks.map((block, idx) => ({
+            index: idx,
+            headline: block.title || `Segment ${idx + 1}`,
+            text: '',
+            duration: block.duration || 5,
+            startTime: storyBlocks.slice(0, idx).reduce((acc, b) => acc + (b.duration || 5), 0),
+            status: 'pending',
+            video: null,
+            blobUrl: block.blobUrl // Fix: Ensure blobUrl is passed for export
+        }));
+        console.log('[App] handleOpenSmartEditor. Initializing with', initialSegments.length, 'segments');
+
+        setSmartTimeline(initialSegments);
+
+        // 2. Switch View IMMEDIATELY
+        setCurrentView('editor');
+
+        // 3. Trigger background video fetching (non-blocking)
+        console.log('[App] Triggering smart-fetch-timeline with', storyBlocks.length, 'blocks');
+        if ((window as any).electron) {
+            console.log('[App] Calling electron.invoke smart-fetch-timeline...');
+            (window as any).electron.invoke('smart-fetch-timeline', {
+                blocks: storyBlocks,
+                scriptText: scriptText  // Pass script for fallback parsing
+            })
+                .then((result: any) => {
+                    console.log('[App] smart-fetch-timeline completed:', result);
+                    if (result && Array.isArray(result)) {
+                        setSmartTimeline(result);
+                    }
+                    // Note: Notification is handled by useEffect watching smartTimeline
+                })
+                .catch((err: any) => {
+                    console.error('[App] smart-fetch-timeline ERROR:', err);
+                    addToast("Error fetching timeline: " + err.message, 'error');
+                });
+        } else {
+            console.warn('[App] window.electron not available!');
+        }
+    };
+
+    // Smart Video Fetcher Actions
+    const handleSmartReplace = async (segmentIndex: number) => {
+        console.log("Replacing clip for segment", segmentIndex);
+        if ((window as any).electron) {
+            await (window as any).electron.invoke('smart-replace-clip', segmentIndex);
+        }
+    };
+
+    // Track if export complete notification has been shown
+    const exportCompleteNotifiedRef = useRef(false);
+    
+    const handleSmartExport = async (options: any, onProgress: (p: any) => void) => {
+        if ((window as any).electron) {
+            // Reset notification flag at start of export
+            exportCompleteNotifiedRef.current = false;
+            
+            // Remove any existing listener to prevent duplicates
+            (window as any).electron.removeAllListeners('smart-export-progress');
+            
+            // Listen for progress from main
+            (window as any).electron.receive('smart-export-progress', (data: any) => {
+                onProgress(data);
+                
+                // Show notification when export completes (only once)
+                if (data.stage === 'complete' && !exportCompleteNotifiedRef.current) {
+                    exportCompleteNotifiedRef.current = true;
+                    showNotification(
+                        'ClickSync - Export Complete',
+                        'Your video has been exported successfully.'
+                    );
+                    addToast('Export Complete', 'Your video has been exported successfully!', 'success');
+                }
+            });
+            return await (window as any).electron.invoke('smart-export-final', options);
+        }
+    };
+
     if (currentView === 'start') {
         return (
             <>
-                <TitleBar />
+                {/* TitleBar handled within StartScreen */}
                 <UpdateNotification
                     status={updateStatus.status}
                     progress={updateStatus.progress}
@@ -1539,258 +2340,55 @@ function App() {
         );
     }
 
-    // --- RENDER EDITOR ---
+    // Audio Clip Update Handler
+
+
+
+    // --- RENDER UNIFIED EDITOR ---
     return (
-        <>
-            <TitleBar />
-            <UpdateNotification
-                status={updateStatus.status}
-                progress={updateStatus.progress}
-                version={updateStatus.version}
-                onDownload={handleDownloadUpdate}
-                onInstall={handleInstallUpdate}
-                onDismiss={() => setUpdateStatus({ ...updateStatus, status: 'idle' })}
-            />
+        <div className="min-h-screen bg-[#050505]">
+            {/* TitleBar handled within EditorView */}
             <ToastContainer toasts={toasts} removeToast={removeToast} />
-            <div className="min-h-screen bg-[#050505] flex flex-col"> {/* Full Screen Flex */}
-                {/* Main Content Scrollable Area */}
-                {/*  PT-0 because Header is sticky top-0 now, but TitleBar is fixed? 
-                      TitleBar is usually fixed/absolute. 
-                      Let's assume TitleBar needs space. 
-                  */}
-                <div className="flex-1 max-w-[1920px] w-full mx-auto p-6 md:p-12 pb-40"> {/* Removed pt-16, handling flow differently */}
 
-                    {/* HEADER (Full Width) */}
-                    <div className="sticky top-0 z-50 w-full bg-[#050505]/95 backdrop-blur-xl border-b border-white/5 transition-all duration-300">
-                        <div className="max-w-[1920px] mx-auto px-6 md:px-12 h-20 flex items-center justify-between">
-                            <div className="flex items-center gap-6">
-                                {/* Back to Projects Button */}
-                                <button
-                                    onClick={handleBackToStart}
-                                    className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors group"
-                                    title="Back to Projects"
-                                >
-                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                                    </svg>
-                                </button>
-
-                                <div className="flex items-baseline gap-2">
-                                    <h1 className="text-2xl font-extrabold tracking-tighter text-white">
-                                        ClickSync<span className="text-[#FF0055]">.</span>
-                                    </h1>
-                                    <span className="px-2 py-0.5 rounded bg-white/5 text-[10px] uppercase font-bold text-gray-400 tracking-widest border border-white/5">
-                                        Unified Studio
-                                    </span>
-                                    {currentProject && (
-                                        <span className="ml-4 text-xs text-gray-500 font-mono hidden md:inline-block">
-                                            / {currentProject.name}
-                                        </span>
-                                    )}
-                                </div>
-                            </div>
-
-                            {/* Right Toolbar */}
-                            <div className="flex items-center gap-6">
-                                {/* Status Pill */}
-                                <div className="flex items-center gap-3 bg-white/5 px-4 py-1.5 rounded-full border border-white/5">
-                                    <div className={`w-2 h-2 rounded-full ${procState.status === 'error' ? 'bg-red-500' : procState.status !== 'idle' && procState.status !== 'completed' ? 'bg-[#FF0055] animate-pulse' : 'bg-[#00FF88]'} shadow-[0_0_10px_currentColor]`} />
-                                    <span className="text-[10px] font-bold font-mono uppercase tracking-widest text-gray-400">
-                                        {procState.status === 'idle' ? 'SYSTEM READY' : procState.status}
-                                    </span>
-                                </div>
-
-                                <div className="h-6 w-[1px] bg-white/10" />
-
-                                <button
-                                    onClick={() => setShowSettings(true)}
-                                    className="p-2 rounded-full hover:bg-white/5 text-gray-400 hover:text-white transition-colors"
-                                    title="API Settings"
-                                >
-                                    <Cog6ToothIcon className="w-5 h-5" />
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* PROCESSING OVERLAY (Hero) - Now includes stats when completed */}
-                    {/* Fixed Sticky Wrapper - Must be outside AnimatePresence for position: sticky to work reliably in some contexts, or ensure parent is tall. 
-                    Actually, we'll make the WRAPPER sticky. 
-                */}
-                    <div className={`transition-all duration-300 z-30 ${procState.status !== 'idle' && procState.status !== 'error' && procState.status !== 'completed' ? 'sticky top-20' : ''}`}>
-                        <AnimatePresence>
-                            {(procState.status !== 'idle' && procState.status !== 'error') && (
-                                <motion.div
-                                    initial={{ opacity: 0, y: -20 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    exit={{ opacity: 0 }}
-                                    className="mb-0" // Removed margin from motion div, handling in wrapper or parent spacing
-                                >
-                                    <ProcessingHero state={procState} />
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
-                    </div>
-                    {/* Spacer if sticky is active to prevent jump? No, sticky takes space. */}
-                    {(procState.status !== 'idle' && procState.status !== 'error') && <div className="h-8" />}
-
-                    <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start">
-
-                        {/* --- LEFT COLUMN: INPUTS (4 cols) --- */}
-                        <div className="xl:col-span-4 flex flex-col gap-6">
-
-                            {/* INPUT CARD 1: AUDIO */}
-                            <LiquidCard title="1. Link Audio">
-                                <LiquidDropZone
-                                    label="Drop Voiceover File"
-                                    fileName={audioFile?.name}
-                                    accept="audio/*"
-                                    onFileSelect={handleAudioSelect}
-                                />
-
-                                {/* Isolated Player to prevent full re-renders */}
-                                <SourceAudioPlayer audioFile={audioFile} />
-                            </LiquidCard>
-
-                            {/* INPUT CARD 2: SCRIPT */}
-                            <LiquidCard title="2. Input Script">
-                                <LiquidTextArea
-                                    placeholder="Paste script with [ON SCREEN: Scene Name] markers..."
-                                    value={scriptText}
-                                    onChange={(e) => setScriptText(e.target.value)}
-                                    disabled={procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error'}
-                                    className={`min-h-[300px] text-xs font-mono ${procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error' ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                />
-                                <div className="pt-4 h-[52px]"> {/* Fixed height container */}
-                                    {procState.status === 'idle' || procState.status === 'completed' || procState.status === 'error' ? (
-                                        <LiquidButton
-                                            disabled={!audioFile || !scriptText?.trim()}
-                                            onClick={startProcessing}
-                                            className="w-full py-4 text-sm font-bold shadow-lg shadow-[#FF0055]/10 hover:shadow-[#FF0055]/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                                        >
-                                            <span className="flex items-center justify-center gap-2">
-                                                <SparklesIcon className="w-4 h-4" />
-                                                GENERATE TIMELINE
-                                            </span>
-                                        </LiquidButton>
-                                    ) : (
-                                        <div className="w-full h-12 relative overflow-hidden rounded-xl bg-black/40 border border-[#FF0055]/20 flex items-stretch">
-                                            {/* Left Side: Status Text */}
-                                            <div className="flex-1 flex items-center gap-3 px-6 relative">
-                                                {/* Living Background Effect (Subtle Breathing) */}
-                                                <div className="absolute inset-0 bg-[#FF0055]/5 animate-pulse" style={{ animationDuration: '3s' }} />
-                                                <div className="absolute -left-10 top-0 bottom-0 w-32 bg-gradient-to-r from-transparent via-[#FF0055]/10 to-transparent blur-xl opacity-50 animate-pulse" />
-
-                                                <div className="relative flex items-center gap-3">
-                                                    <div className="relative flex h-2 w-2">
-                                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#FF0055] opacity-75"></span>
-                                                        <span className="relative inline-flex rounded-full h-2 w-2 bg-[#FF0055]"></span>
-                                                    </div>
-                                                    <span className="text-[10px] font-bold text-[#FF0055] tracking-[0.2em] uppercase animate-pulse">
-                                                        GENERATING TIMELINE...
-                                                    </span>
-                                                </div>
-                                            </div>
-
-                                            {/* Right Side: Solid Cancel Block */}
-                                            <button
-                                                onClick={cancelProcessing}
-                                                className="px-6 h-full flex items-center justify-center bg-white/5 hover:bg-red-500/20 text-gray-500 hover:text-red-400 transition-colors border-l border-white/10 z-10"
-                                                title="Stop Generation"
-                                            >
-                                                <span className="text-[10px] font-bold uppercase tracking-widest">Stop</span>
-                                            </button>
-                                        </div>
-                                    )}
-                                </div>
-                            </LiquidCard>
-
-                        </div>
-
-                        {/* --- RIGHT COLUMN: RESULTS (8 cols) --- */}
-                        <div className="xl:col-span-8 space-y-6">
-
-                            {/* Top Bar: Summary & Download */}
-                            {(storyBlocks.length > 0) && (
-                                <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-4 rounded-xl bg-white/5 border border-white/10 backdrop-blur-md">
-                                    <div className="flex-1">
-                                        <h2 className="text-lg font-bold text-white mb-1">Generated Context Summary</h2>
-                                        {scriptSummary ? (
-                                            <p className="text-sm text-gray-400 leading-relaxed">{scriptSummary}</p>
-                                        ) : (
-                                            <div className="h-4 w-48 bg-white/5 rounded animate-pulse" />
-                                        )}
-                                    </div>
-                                    <div className="flex items-center gap-3 shrink-0">
-                                        {/* Segment Count */}
-                                        <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-lg border border-white/10">
-                                            <FilmIcon className="w-4 h-4 text-[#FF0055]" />
-                                            <span className="text-xs font-medium text-white">{storyBlocks.length} Segments</span>
-                                        </div>
-
-                                        {/* Total Duration */}
-                                        {(() => {
-                                            const totalSeconds = storyBlocks.reduce((acc, block) => acc + (block.duration || 0), 0);
-                                            const minutes = Math.floor(totalSeconds / 60);
-                                            const seconds = Math.floor(totalSeconds % 60);
-                                            return (
-                                                <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-lg border border-white/10">
-                                                    <ClockIcon className="w-4 h-4 text-[#FF0055]" />
-                                                    <span className="text-xs font-medium text-white">{minutes}:{seconds.toString().padStart(2, '0')}</span>
-                                                </div>
-                                            );
-                                        })()}
-
-                                        <LiquidButton variant="secondary" onClick={downloadAllSegments} className="flex items-center gap-2">
-                                            <ArrowDownTrayIcon className="w-4 h-4" />
-                                            <span>Download .ZIP</span>
-                                        </LiquidButton>
-                                    </div>
-                                </div>
-                            )}
-
-                            {storyBlocks.length === 0 && procState.status === 'idle' && (
-                                <div className="h-[600px] flex flex-col items-center justify-center text-center opacity-30">
-                                    <FilmIcon className="w-24 h-24 text-white mb-4" />
-                                    <h3 className="text-xl font-bold text-white">Ready for Production</h3>
-                                    <p className="text-sm text-gray-400 max-w-md mt-2">
-                                        Import your voiceover and script to begin the automated alignment and matching process.
-                                    </p>
-                                </div>
-                            )}
-
-                            {/* RESULT BLOCKS */}
-                            <div className="space-y-4">
-                                {storyBlocks.map((block, idx) => (
-                                    <div key={block.id} className="contain-content">
-                                        <ResultBlockItem
-                                            block={block}
-                                            blockIndex={idx}
-                                            playingId={playingId}
-                                            isExpanded={expandedBlocks.has(block.id)}
-                                            onToggleExpand={toggleBlockExpansion}
-                                            onPlay={playPreview}
-                                            onRetry={retryVideoMatch}
-                                        />
-                                    </div>
-                                ))}
-                            </div>
-
-                        </div>
-                    </div>
+            {/* Processing Overlay */}
+            {procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error' && (
+                <div className="fixed top-12 left-1/2 -translate-x-1/2 z-[100] w-full max-w-2xl px-4 pointer-events-auto">
+                    <ProcessingHero state={procState} />
                 </div>
+            )}
 
-                {/* SETTINGS MODAL */}
-                <SettingsModal
-                    isOpen={showSettings}
-                    onClose={() => setShowSettings(false)}
-                    apiKey={apiKeyInput}
-                    onApiKeyChange={setApiKeyInput}
-                    version="v1.0.9 Unified Studio"
+
+            <div className="pt-8 h-screen box-border">
+                <EditorView
+                    project={{ ...currentProject, logs: projectLogs }}
+                    timeline={{ segments: smartTimeline }}
+                    audioUrl={masterAudioUrl}
+                    audioFilePath={audioFilePath} // Pass real file path for export
+                    audioClips={audioClips}
+                    storyBlocks={storyBlocks}
+                    onUpdateAudioClip={handleUpdateAudioClip}
+                    isProcessing={procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error'}
+
+                    onReplaceClip={handleSmartReplace}
+                    onApproveSegment={(idx) => {
+                        setSmartTimeline(prev => prev.map((seg, i) =>
+                            i === idx ? { ...seg, status: 'approved' } : seg
+                        ));
+                    }}
+                    onExportFinal={handleSmartExport}
+                    onUpdateClipProperty={(idx, prop, val) => {
+                        if ((window as any).electron) {
+                            (window as any).electron.invoke('smart-update-clip-option', { index: idx, prop, value: val });
+                        }
+                    }}
+                    onBack={handleBackToStart}
                 />
             </div>
-        </>
+        </div>
     );
 }
+// Removed legacy return
+function LegacyRemoved() { return null; }
+
 
 export default App;

@@ -2,7 +2,7 @@
   "name": "click-sync",
   "productName": "Click Sync",
   "private": true,
-  "version": "1.0.91",
+  "version": "2.0.0",
   "description": "AI-Powered Video Matching & Audio Transcription Studio",
   "author": "ClickSync Team",
   "type": "module",
@@ -13,22 +13,34 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rimraf release/ dist/",
-    "electron:dev": "concurrently \"npm run dev\" \"npm run server\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "npm run clean && npm run build && electron-builder --win",
-    "electron:pack": "npm run build && electron-builder --dir",
-    "electron:publish": "npm run clean && npm run build && electron-builder --win --publish always"
+    "remotion:bundle": "npx remotion bundle remotion/index.ts --out-dir remotion-bundle",
+    "electron:dev": "concurrently \"npm run dev\" \"npm run server\" \"wait-on tcp:3000 && electron .\"",
+    "electron:build": "npm run clean && npm run remotion:bundle && npm run build && electron-builder --win",
+    "electron:pack": "npm run remotion:bundle && npm run build && electron-builder --dir",
+    "electron:publish": "npm run clean && npm run remotion:bundle && npm run build && electron-builder --win --publish always"
   },
   "dependencies": {
     "@google/genai": "^1.34.0",
     "@google/generative-ai": "^0.24.1",
     "@heroicons/react": "^2.2.0",
+    "@remotion/bundler": "^4.0.409",
+    "@remotion/cli": "^4.0.409",
+    "@remotion/google-fonts": "^4.0.409",
+    "@remotion/player": "^4.0.409",
+    "@remotion/renderer": "^4.0.409",
+    "@types/react": "^19.2.9",
+    "@types/react-dom": "^19.2.3",
     "assemblyai": "^4.22.1",
+    "canvas": "^3.2.1",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "electron-log": "^5.4.3",
     "electron-updater": "^6.7.3",
     "express": "^5.2.1",
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0",
+    "fluent-ffmpeg": "^2.1.3",
     "framer-motion": "^12.23.26",
     "gsap": "^3.14.2",
     "jszip": "^3.10.1",
@@ -36,6 +48,7 @@
     "playwright": "^1.57.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
+    "remotion": "^4.0.409",
     "tailwind-merge": "^3.4.0",
     "uuid": "^13.0.0",
     "wavesurfer.js": "^7.12.1"
@@ -63,13 +76,32 @@
       "electron/**/*",
       "server.js",
       "services/**/*",
-      "node_modules/**/*",
-      "package.json"
+      "assets/**/*",
+      "config.js",
+      "remotion-bundle/**/*"
+    ],
+    "asarUnpack": [
+      "electron/**/*",
+      "services/**/*",
+      "assets/**/*",
+      "remotion-bundle/**/*",
+      "node_modules/ffmpeg-static/**/*",
+      "node_modules/ffprobe-static/**/*",
+      "node_modules/playwright-core/**/*",
+      "node_modules/@remotion/compositor-win32-x64-msvc/**/*"
     ],
     "extraResources": [
       {
         "from": "public/tray-icon.png",
         "to": "assets/tray-icon.png"
+      },
+      {
+        "from": "public/logo.png",
+        "to": "assets/logo.png"
+      },
+      {
+        "from": "public/favicon.ico",
+        "to": "assets/icon.ico"
       },
       {
         "from": "uploads",

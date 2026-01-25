@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowDownTrayIcon, SparklesIcon, XMarkIcon } from '@heroicons/react/24/solid';
 
 interface UpdateNotificationProps {
-    status: 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error';
+    status: 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error' | 'latest';
     progress?: number;
     version?: string;
     message?: string;

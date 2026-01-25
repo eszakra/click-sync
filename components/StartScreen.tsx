@@ -1,14 +1,15 @@
-import React, { useState, useEffect } from 'react';
-import { PlusIcon, TrashIcon, FilmIcon, ClockIcon, PencilIcon, Cog6ToothIcon } from '@heroicons/react/24/solid';
+import React, { useState, useEffect, useRef } from 'react';
+import { PlusIcon, TrashIcon, FilmIcon, ClockIcon, PencilIcon, Cog6ToothIcon, ArrowUpTrayIcon, DocumentTextIcon, ChevronRightIcon } from '@heroicons/react/24/solid';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ProjectData, projectService } from '../services/projectService';
+import TitleBar from './TitleBar';
 
 interface StartScreenProps {
     recents: ProjectData[];
-    onNewProject: (name?: string) => void; // Updated signature
+    onNewProject: (name: string, audioFile: File, scriptText: string) => void;
     onOpenProject: (proj: ProjectData) => void;
     onDeleteProject: (id: string) => void;
-    onResumeSession?: () => void;
+    onResumeSession?: (project?: ProjectData | null) => void;
     resumeProject?: ProjectData | null;
     onRename?: (id: string, newName: string) => void;
     onOpenSettings: () => void;
@@ -27,14 +28,44 @@ export const StartScreen: React.FC<StartScreenProps> = ({
     const [deleteConfirm, setDeleteConfirm] = React.useState<{ show: boolean; project: ProjectData | null }>({ show: false, project: null });
     const [showResumeParams, setShowResumeParams] = React.useState(false);
 
-    // NEW PROJECT STATE
+    // NEW PROJECT WIZARD STATE
     const [showCreateModal, setShowCreateModal] = useState(false);
+    const [wizardStep, setWizardStep] = useState(1); // 1: Name, 2: Audio, 3: Script
     const [newProjectName, setNewProjectName] = useState("");
+    const [audioFile, setAudioFile] = useState<File | null>(null);
+    const [scriptText, setScriptText] = useState("");
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const resetWizard = () => {
+        setWizardStep(1);
+        setNewProjectName("");
+        setAudioFile(null);
+        setAudioFilePath('');
+        setAudioFileName('');
+        setAudioFileSize(0);
+        setScriptText("");
+        setShowCreateModal(false);
+    };
 
     const handleCreateConfirm = () => {
-        onNewProject(newProjectName.trim() || undefined);
-        setShowCreateModal(false);
-        setNewProjectName("");
+        if (!newProjectName || !scriptText) return;
+        // Need either audioFile OR audioFilePath (native)
+        if (!audioFile && !audioFilePath) return;
+        
+        // If we have a native path, attach it to the file object
+        let fileToPass = audioFile;
+        if (audioFilePath && fileToPass) {
+            (fileToPass as any).nativePath = audioFilePath;
+        } else if (audioFilePath && !audioFile) {
+            // Create file object with native path
+            fileToPass = new File([], audioFileName, { type: 'audio/mpeg' });
+            (fileToPass as any).nativePath = audioFilePath;
+        }
+        
+        if (!fileToPass) return;
+        
+        onNewProject(newProjectName.trim(), fileToPass, scriptText);
+        resetWizard();
     };
 
     // RENAME STATE
@@ -46,8 +77,6 @@ export const StartScreen: React.FC<StartScreenProps> = ({
             setShowResumeParams(true);
         }
     }, [resumeProject]);
-
-
 
     const formatDate = (ts: number) => {
         const d = new Date(ts);
@@ -66,8 +95,51 @@ export const StartScreen: React.FC<StartScreenProps> = ({
         }
     };
 
+    // State for native file selection (path-based like pro editors)
+    const [audioFilePath, setAudioFilePath] = useState<string>('');
+    const [audioFileName, setAudioFileName] = useState<string>('');
+    const [audioFileSize, setAudioFileSize] = useState<number>(0);
+
+    const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        // Fallback for web file input (if Electron dialog fails)
+        if (e.target.files && e.target.files[0]) {
+            setAudioFile(e.target.files[0]);
+        }
+    };
+
+    // Use native Electron dialog - like pro editors, references original file
+    const handleNativeFileSelect = async () => {
+        if ((window as any).electron) {
+            try {
+                const result = await (window as any).electron.invoke('dialog:open-audio');
+                if (result) {
+                    // Store the path directly - no copying needed!
+                    setAudioFilePath(result.path);
+                    setAudioFileName(result.name);
+                    setAudioFileSize(result.size);
+                    
+                    // Create a minimal File object for compatibility with existing code
+                    // We'll use the path for actual operations
+                    const dummyFile = new File([], result.name, { type: 'audio/mpeg' });
+                    (dummyFile as any).nativePath = result.path; // Attach real path
+                    setAudioFile(dummyFile);
+                    
+                    console.log('[StartScreen] Audio selected via native dialog:', result.path);
+                }
+            } catch (err) {
+                console.error('[StartScreen] Native dialog failed:', err);
+                // Fallback to web input
+                fileInputRef.current?.click();
+            }
+        } else {
+            // Web fallback
+            fileInputRef.current?.click();
+        }
+    };
+
     return (
         <div className="min-h-screen bg-[#050505] flex text-white font-sans selection:bg-[#FF0055] selection:text-white overflow-hidden">
+            <TitleBar />
 
             {/* Resume Session Modal */}
             <AnimatePresence>
@@ -155,7 +227,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
             </AnimatePresence>
 
             {/* LEFT SIDEBAR */}
-            <div className="w-64 bg-[#09090b] border-r border-white/5 flex flex-col p-6 gap-8 z-20 shadow-2xl">
+            <div className="w-64 bg-[#09090b] border-r border-white/5 flex flex-col p-6 gap-8 z-20 shadow-2xl mt-8">
                 {/* Logo Area */}
                 <div className="flex flex-col gap-1 mb-4">
                     <h1 className="text-2xl font-extrabold tracking-tighter text-white">
@@ -189,7 +261,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
             </div>
 
             {/* MAIN CONTENT AREA */}
-            <div className="flex-1 relative flex flex-col">
+            <div className="flex-1 relative flex flex-col mt-8">
                 <div className="absolute inset-0 bg-gradient-to-br from-[#050505] via-[#09090b] to-[#111] z-0" />
 
                 {/* Hero Header */}
@@ -205,171 +277,252 @@ export const StartScreen: React.FC<StartScreenProps> = ({
                     </div>
 
                     {recents.length === 0 ? (
-                        <div className="text-center py-20 opacity-30">
-                            <ClockIcon className="w-16 h-16 text-gray-500 mx-auto mb-4" />
-                            <p className="text-gray-400">No recent projects found.</p>
-                        </div>
-                    ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 pb-20">
-                            {recents.map(proj => (
-                                <motion.div
-                                    layoutId={proj.id}
-                                    key={proj.id}
-                                    className="group aspect-[4/3] bg-[#09090b] border border-white/5 hover:border-[#FF0055]/30 rounded-xl overflow-hidden cursor-pointer relative shadow-lg hover:shadow-[#FF0055]/10 hover:-translate-y-1 transition-all duration-300"
-                                >
-                                    {/* Rename Button (Pencil) */}
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            // Trigger Rename Logic
-                                            setRenameTarget(proj);
-                                            setRenameInput(proj.name);
-                                        }}
-                                        className="absolute top-3 right-12 z-10 w-7 h-7 bg-black/40 hover:bg-[#2997FF]/90 backdrop-blur-sm rounded-lg flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all hover:scale-110"
-                                        title="Rename project"
-                                    >
-                                        <PencilIcon className="w-3.5 h-3.5 text-white/70" />
-                                    </button>
-
-                                    {/* Delete Button - Subtle dark theme */}
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            setDeleteConfirm({ show: true, project: proj });
-                                        }}
-                                        className="absolute top-3 right-3 z-10 w-7 h-7 bg-black/40 hover:bg-[#FF0055]/90 backdrop-blur-sm rounded-lg flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all hover:scale-110"
-                                        title="Delete project"
-                                    >
-                                        <TrashIcon className="w-3.5 h-3.5 text-white/70" />
-                                    </button>
-
-                                    <div onClick={() => onOpenProject(proj)} className="h-full w-full">
-                                        {/* Thumbnail - Full height, only icon centered */}
-                                        <div className="h-full w-full bg-gradient-to-br from-white/5 to-white/[0.02] flex items-center justify-center group-hover:from-[#FF0055]/10 group-hover:to-[#FF0055]/5 transition-all">
-                                            <FilmIcon className="w-12 h-12 text-white/20 group-hover:text-[#FF0055]/40 transition-colors" />
+                                        <div className="text-center py-20">
+                                            <div className="w-20 h-20 rounded-full bg-white/5 flex items-center justify-center mx-auto mb-4">
+                                                <ClockIcon className="w-10 h-10 text-gray-600" />
+                                            </div>
+                                            <p className="text-gray-500 font-medium">No recent projects</p>
+                                            <p className="text-gray-600 text-sm mt-1">Create a new project to get started</p>
                                         </div>
-                                        {/* Info - Overlayed at the bottom */}
-                                        <div className="absolute bottom-0 left-0 right-0 p-4 flex flex-col justify-center bg-gradient-to-t from-[#111]/90 to-transparent">
-                                            <h3 className="text-sm font-bold text-white truncate group-hover:text-[#FF0055] transition-colors">{proj.name}</h3>
-                                            <p className="text-[10px] text-gray-500 flex items-center gap-2 mt-1">
-                                                <span>{formatDate(proj.lastModified)}</span>
-                                                {proj.audioName && <span className="w-1 h-1 rounded-full bg-gray-600" />}
-                                                {proj.audioName && <span className="truncate max-w-[100px]">{proj.audioName}</span>}
-                                            </p>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 pb-20">
+                                            {recents.map(proj => {
+                                                // Use smartTimeline for segment info (it stores the processed segments)
+                                                const segments = (proj as any).smartTimeline?.segments || [];
+                                                const segmentCount = segments.length;
+                                                const approvedCount = segments.filter((s: any) => s.status === 'approved').length;
+                                                const hasProgress = segmentCount > 0;
+                                                
+                                                return (
+                                                    <motion.div
+                                                        layoutId={proj.id}
+                                                        key={proj.id}
+                                                        className="group bg-[#0C0C0E] border border-white/[0.06] hover:border-[#FF0055]/30 rounded-xl overflow-hidden cursor-pointer relative shadow-lg hover:shadow-[#FF0055]/10 transition-all duration-300"
+                                                    >
+                                                        {/* Action Buttons */}
+                                                        <div className="absolute top-2 right-2 z-10 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); setRenameTarget(proj); setRenameInput(proj.name); }}
+                                                                className="w-7 h-7 bg-black/60 hover:bg-[#2997FF] backdrop-blur-sm rounded-md flex items-center justify-center transition-all hover:scale-105"
+                                                            >
+                                                                <PencilIcon className="w-3 h-3 text-white/80" />
+                                                            </button>
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ show: true, project: proj }); }}
+                                                                className="w-7 h-7 bg-black/60 hover:bg-[#FF0055] backdrop-blur-sm rounded-md flex items-center justify-center transition-all hover:scale-105"
+                                                            >
+                                                                <TrashIcon className="w-3 h-3 text-white/80" />
+                                                            </button>
+                                                        </div>
+
+                                                        <div onClick={() => onOpenProject(proj)} className="h-full w-full">
+                                                            {/* Thumbnail Area */}
+                                                            <div className="aspect-video bg-gradient-to-br from-white/[0.03] to-transparent flex items-center justify-center group-hover:from-[#FF0055]/10 transition-all relative">
+                                                                <FilmIcon className="w-10 h-10 text-white/10 group-hover:text-[#FF0055]/30 transition-colors" />
+                                                                {hasProgress && (
+                                                                    <div className="absolute bottom-2 left-2 right-2">
+                                                                        <div className="h-1 bg-white/10 rounded-full overflow-hidden">
+                                                                            <div 
+                                                                                className="h-full bg-[#FF0055] rounded-full transition-all" 
+                                                                                style={{ width: `${(approvedCount / segmentCount) * 100}%` }}
+                                                                            />
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                            
+                                                            {/* Info Area */}
+                                                            <div className="p-3 border-t border-white/[0.04]">
+                                                                <h3 className="text-sm font-semibold text-white truncate group-hover:text-[#FF0055] transition-colors">{proj.name}</h3>
+                                                                <div className="flex items-center justify-between mt-1.5">
+                                                                    <span className="text-[10px] text-gray-500">{formatDate(proj.lastModified)}</span>
+                                                                    {hasProgress && (
+                                                                        <span className="text-[10px] text-gray-500">
+                                                                            {approvedCount}/{segmentCount} done
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </motion.div>
+                                                );
+                                            })}
                                         </div>
-                                    </div>
-                                </motion.div>
-                            ))}
-                        </div>
-                    )}
+                                    )}
                 </div>
 
-                {/* RENAME MODAL */}
+                {/* CREATE PROJECT WIZARD MODAL */}
                 <AnimatePresence>
-                    {renameTarget && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
-                            <motion.div
-                                initial={{ opacity: 0 }}
-                                animate={{ opacity: 1 }}
-                                exit={{ opacity: 0 }}
-                                className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-                                onClick={() => setRenameTarget(null)}
-                            />
+                    {showCreateModal && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/80 backdrop-blur-sm"
+                            onClick={resetWizard}
+                        >
                             <motion.div
                                 initial={{ scale: 0.95, opacity: 0 }}
                                 animate={{ scale: 1, opacity: 1 }}
                                 exit={{ scale: 0.95, opacity: 0 }}
-                                className="relative bg-[#0A0A0A] border border-white/10 p-6 rounded-2xl w-full max-w-sm shadow-2xl"
+                                onClick={(e) => e.stopPropagation()}
+                                className="relative bg-[#0A0A0A] border border-white/10 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden flex flex-col"
                             >
-                                <h3 className="text-lg font-bold text-white mb-4">Rename Project</h3>
-                                <input
-                                    type="text"
-                                    value={renameInput}
-                                    onChange={(e) => setRenameInput(e.target.value)}
-                                    className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-white mb-4 focus:border-[#2997FF] outline-none"
-                                    autoFocus
-                                    onKeyDown={(e) => {
-                                        if (e.key === 'Enter') {
-                                            if (renameInput.trim()) {
-                                                projectService.renameProject(renameTarget.id, renameInput.trim()).then(() => {
-                                                    setRenameTarget(null);
-                                                    if (onRename) onRename(renameTarget.id, renameInput.trim());
-                                                });
-                                            }
-                                        }
-                                    }}
-                                />
-                                <div className="flex justify-end gap-3">
-                                    <button
-                                        onClick={() => setRenameTarget(null)}
-                                        className="px-4 py-2 text-sm text-gray-400 hover:text-white"
+                                {/* Header with Step Indicator */}
+                                <div className="p-6 border-b border-white/5">
+                                    <div className="flex justify-between items-center mb-4">
+                                        <h3 className="text-xl font-bold text-white">New Project</h3>
+                                        <button onClick={resetWizard} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/5 text-gray-500 hover:text-white transition-colors">
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                        </button>
+                                    </div>
+                                    {/* Step Progress */}
+                                    <div className="flex items-center gap-2">
+                                        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${wizardStep === 1 ? 'bg-[#FF0055] text-white' : wizardStep > 1 ? 'bg-[#FF0055]/20 text-[#FF0055]' : 'bg-white/5 text-gray-500'}`}>
+                                            <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${wizardStep > 1 ? 'bg-[#FF0055] text-white' : ''}`}>
+                                                {wizardStep > 1 ? '✓' : '1'}
+                                            </span>
+                                            Name
+                                        </div>
+                                        <div className={`w-8 h-0.5 ${wizardStep > 1 ? 'bg-[#FF0055]/50' : 'bg-white/10'}`} />
+                                        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${wizardStep === 2 ? 'bg-[#FF0055] text-white' : wizardStep > 2 ? 'bg-[#FF0055]/20 text-[#FF0055]' : 'bg-white/5 text-gray-500'}`}>
+                                            <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${wizardStep > 2 ? 'bg-[#FF0055] text-white' : ''}`}>
+                                                {wizardStep > 2 ? '✓' : '2'}
+                                            </span>
+                                            Audio
+                                        </div>
+                                        <div className={`w-8 h-0.5 ${wizardStep > 2 ? 'bg-[#FF0055]/50' : 'bg-white/10'}`} />
+                                        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${wizardStep === 3 ? 'bg-[#FF0055] text-white' : 'bg-white/5 text-gray-500'}`}>
+                                            <span>3</span>
+                                            Script
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Steps */}
+                                <div className="p-8 min-h-[320px] flex flex-col">
+                                    {wizardStep === 1 && (
+                                        <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-400 mb-2">What should we call this project?</label>
+                                                <input
+                                                    type="text"
+                                                    placeholder="e.g., Q4 Product Launch"
+                                                    value={newProjectName}
+                                                    onChange={(e) => setNewProjectName(e.target.value)}
+                                                    className="w-full bg-white/5 border border-white/10 rounded-xl p-4 text-lg text-white placeholder:text-gray-600 focus:border-[#FF0055] focus:ring-1 focus:ring-[#FF0055]/30 outline-none transition-all"
+                                                    autoFocus
+                                                    onKeyDown={(e) => { if (e.key === 'Enter' && newProjectName) setWizardStep(2); }}
+                                                />
+                                            </div>
+                                            <p className="text-xs text-gray-500">Press Enter to continue</p>
+                                        </motion.div>
+                                    )}
+
+                                    {wizardStep === 2 && (
+                                        <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col gap-4">
+                                            <label className="block text-sm font-medium text-gray-400">Upload your voiceover audio</label>
+                                            <div
+                                                className={`relative border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all group ${(audioFilePath || audioFile) ? 'border-[#FF0055]/40 bg-[#FF0055]/5' : 'border-white/10 hover:border-[#FF0055]/50 hover:bg-white/[0.02]'}`}
+                                                onClick={handleNativeFileSelect}
+                                            >
+                                                <input
+                                                    type="file"
+                                                    accept="audio/*"
+                                                    className="hidden"
+                                                    ref={fileInputRef}
+                                                    onChange={handleFileSelect}
+                                                />
+                                                {(audioFilePath || audioFile) ? (
+                                                    <div className="text-center">
+                                                        <div className="w-14 h-14 rounded-full bg-[#FF0055]/20 flex items-center justify-center mx-auto mb-3">
+                                                            <svg className="w-6 h-6 text-[#FF0055]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                                                        </div>
+                                                        <p className="text-white font-semibold mb-1">{audioFileName || audioFile?.name}</p>
+                                                        <p className="text-xs text-gray-500">
+                                                            {((audioFileSize || audioFile?.size || 0) / 1024 / 1024).toFixed(2)} MB
+                                                        </p>
+                                                        <button className="mt-3 text-xs text-[#FF0055] hover:underline">Change file</button>
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-center">
+                                                        <div className="w-14 h-14 rounded-full bg-white/5 flex items-center justify-center mx-auto mb-3 group-hover:scale-105 group-hover:bg-[#FF0055]/10 transition-all">
+                                                            <ArrowUpTrayIcon className="w-6 h-6 text-gray-400 group-hover:text-[#FF0055] transition-colors" />
+                                                        </div>
+                                                        <p className="text-white font-medium mb-1">Click to browse files</p>
+                                                        <p className="text-xs text-gray-500">MP3, WAV, AAC, M4A, OGG, FLAC</p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </motion.div>
+                                    )}
+
+                                    {wizardStep === 3 && (
+                                        <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex-1 flex flex-col gap-3">
+                                            <div className="flex items-center justify-between">
+                                                <label className="block text-sm font-medium text-gray-400">Paste your script</label>
+                                                <span className="text-xs text-gray-600">{scriptText.length > 0 ? `${scriptText.split(/\s+/).filter(Boolean).length} words` : ''}</span>
+                                            </div>
+                                            <textarea
+                                                placeholder="Paste your script text here. This will be used to align with the audio and find matching B-roll footage..."
+                                                value={scriptText}
+                                                onChange={(e) => setScriptText(e.target.value)}
+                                                className="w-full flex-1 bg-white/5 border border-white/10 rounded-xl p-4 text-sm text-gray-300 placeholder:text-gray-600 focus:border-[#FF0055] focus:ring-1 focus:ring-[#FF0055]/30 outline-none transition-all resize-none leading-relaxed"
+                                                autoFocus
+                                            />
+                                        </motion.div>
+                                    )}
+                                </div>
+
+                                {/* Footer Actions */}
+                                <div className="p-6 border-t border-white/5 flex justify-between items-center bg-black/20">
+                                    <button 
+                                        onClick={() => wizardStep > 1 ? setWizardStep(prev => prev - 1) : resetWizard()} 
+                                        className="flex items-center gap-2 px-4 py-2.5 text-sm text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-all"
                                     >
-                                        Cancel
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                                        {wizardStep > 1 ? 'Back' : 'Cancel'}
                                     </button>
-                                    <button
-                                        onClick={() => {
-                                            if (renameInput.trim()) {
-                                                if (onRename) {
-                                                    onRename(renameTarget.id, renameInput.trim());
-                                                    setRenameTarget(null);
-                                                }
+
+                                    {wizardStep < 3 ? (
+                                        <button
+                                            onClick={() => {
+                                                if (wizardStep === 1 && newProjectName) setWizardStep(2);
+                                                if (wizardStep === 2 && (audioFile || audioFilePath)) setWizardStep(3);
+                                            }}
+                                            disabled={
+                                                (wizardStep === 1 && !newProjectName) ||
+                                                (wizardStep === 2 && !audioFile && !audioFilePath)
                                             }
-                                        }}
-                                        className="px-4 py-2 text-sm bg-[#2997FF] hover:bg-[#2997FF]/80 text-white rounded-lg font-bold"
-                                    >
-                                        Save
-                                    </button>
+                                            className="flex items-center gap-2 px-6 py-2.5 bg-white/10 hover:bg-white/15 disabled:opacity-30 disabled:cursor-not-allowed text-white rounded-lg font-semibold transition-all"
+                                        >
+                                            Continue
+                                            <ChevronRightIcon className="w-4 h-4" />
+                                        </button>
+                                    ) : (
+                                        <button
+                                            onClick={handleCreateConfirm}
+                                            disabled={!scriptText}
+                                            className="flex items-center gap-2 px-6 py-2.5 bg-[#FF0055] hover:bg-[#FF1F69] disabled:opacity-30 disabled:cursor-not-allowed text-white rounded-lg font-bold shadow-[0_0_20px_rgba(255,0,85,0.35)] hover:shadow-[0_0_25px_rgba(255,0,85,0.5)] transition-all"
+                                        >
+                                            Create Project
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg>
+                                        </button>
+                                    )}
                                 </div>
                             </motion.div>
                         </div>
                     )}
                 </AnimatePresence>
 
-                {/* CREATE PROJECT MODAL */}
+                {/* Rename Modal (Simplified) */}
                 <AnimatePresence>
-                    {showCreateModal && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
-                            <motion.div
-                                initial={{ opacity: 0 }}
-                                animate={{ opacity: 1 }}
-                                exit={{ opacity: 0 }}
-                                className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-                                onClick={() => setShowCreateModal(false)}
-                            />
-                            <motion.div
-                                initial={{ scale: 0.95, opacity: 0 }}
-                                animate={{ scale: 1, opacity: 1 }}
-                                exit={{ scale: 0.95, opacity: 0 }}
-                                className="relative bg-[#0A0A0A] border border-white/10 p-6 rounded-2xl w-full max-w-sm shadow-2xl"
-                            >
-                                <h3 className="text-lg font-bold text-white mb-4">New Project</h3>
-                                <div className="mb-4">
-                                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Project Name</label>
-                                    <input
-                                        type="text"
-                                        placeholder="New Project"
-                                        value={newProjectName}
-                                        onChange={(e) => setNewProjectName(e.target.value)}
-                                        className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-white focus:border-[#FF0055] outline-none transition-colors placeholder-gray-600"
-                                        autoFocus
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter') handleCreateConfirm();
-                                        }}
-                                    />
-                                </div>
-                                <div className="flex justify-end gap-3">
-                                    <button
-                                        onClick={() => setShowCreateModal(false)}
-                                        className="px-4 py-2 text-sm text-gray-400 hover:text-white"
-                                    >
-                                        Cancel
-                                    </button>
-                                    <button
-                                        onClick={handleCreateConfirm}
-                                        className="px-4 py-2 text-sm bg-[#FF0055] hover:bg-[#FF1F69] text-white rounded-lg font-bold shadow-[0_0_15px_rgba(255,0,85,0.3)]"
-                                    >
-                                        Create Project
-                                    </button>
+                    {renameTarget && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/80 backdrop-blur-sm"
+                            onClick={() => setRenameTarget(null)}>
+                            {/* ... Content same as before but minimal ... */}
+                            <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="bg-[#0A0A0A] p-6 rounded-xl border border-white/10 w-full max-w-sm" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-white font-bold mb-4">Rename Project</h3>
+                                <input value={renameInput} onChange={e => setRenameInput(e.target.value)} className="w-full bg-white/5 p-3 rounded-lg text-white mb-4 border border-white/10 outline-none focus:border-[#2997FF]" autoFocus />
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={() => setRenameTarget(null)} className="px-4 py-2 text-gray-400 text-sm">Cancel</button>
+                                    <button onClick={() => { if (onRename && renameInput) { onRename(renameTarget.id, renameInput); setRenameTarget(null); } }} className="px-4 py-2 bg-[#2997FF] text-white rounded-lg text-sm font-bold">Save</button>
                                 </div>
                             </motion.div>
                         </div>

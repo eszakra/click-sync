@@ -30,11 +30,34 @@ contextBridge.exposeInMainWorld('electron', {
     tray: {
         updateProgress: (data) => ipcRenderer.send('update-tray-progress', data)
     },
+    // Viory session management
+    viory: {
+        getStatus: () => ipcRenderer.invoke('get-viory-session-status'),
+        verify: () => ipcRenderer.invoke('verify-viory-session'),
+        forceLogin: () => ipcRenderer.invoke('force-viory-login'),
+        onStatusUpdate: (callback) => {
+            const subscription = (event, data) => callback(data);
+            ipcRenderer.on('viory-status-update', subscription);
+            return () => ipcRenderer.removeListener('viory-status-update', subscription);
+        },
+        onSessionStatus: (callback) => {
+            const subscription = (event, data) => callback(data);
+            ipcRenderer.on('viory-session-status', subscription);
+            return () => ipcRenderer.removeListener('viory-session-status', subscription);
+        }
+    },
     // Auto-update and General IPC
     invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
+    on: (channel, func) => {
+        // Wrapper for ipcRenderer.on
+        const subscription = (event, ...args) => func(event, ...args);
+        ipcRenderer.on(channel, subscription);
+        return () => ipcRenderer.removeListener(channel, subscription);
+    },
     receive: (channel, func) => {
-        // Deliberately strip event as it includes `sender` 
+        // Legacy support
         ipcRenderer.on(channel, (event, ...args) => func(...args));
     },
+    removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel),
     send: (channel, ...args) => ipcRenderer.send(channel, ...args)
 });

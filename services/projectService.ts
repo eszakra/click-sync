@@ -11,6 +11,9 @@ export interface ProjectData {
     scriptSummary?: string | null;
     procState?: any; // ProcessingState
     storyBlocks?: any[]; // StoryBlock[]
+    smartTimeline?: any[]; // Timeline with video data
+    storagePath?: string;
+    logs?: string[];
 }
 
 // Check if window.electron (IPC) is available
