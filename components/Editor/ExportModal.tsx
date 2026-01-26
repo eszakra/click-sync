@@ -66,6 +66,7 @@ interface ExportModalProps {
         overlayText?: string;
         segmentIndex?: number;
         totalSegments?: number;
+        renderProgress?: number; // Internal render progress (0-100)
     } | null;
     onReset?: () => void;
     onCancel?: () => void; // Cancel export
@@ -206,67 +207,60 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                                     <span className="text-red-400 text-sm font-semibold">Export Failed</span>
                                 </div>
                             ) : progress?.stage === 'generating_overlays' || progress?.stage === 'generating_lower_thirds' ? (
-                                /* Unified Overlays Generation State */
-                                <>
-                                    {/* Animated Icon */}
-                                    <div className="relative mt-2">
-                                        <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-[#FF0055]/20 to-[#FF0055]/5 flex items-center justify-center border border-[#FF0055]/30">
-                                            {progress?.overlayType === 'mandatory_credit' ? (
-                                                /* Tag/Label icon for mandatory credit (top-left corner element) */
-                                                <svg className="w-7 h-7 text-[#FF0055]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" />
-                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 6h.008v.008H6V6z" />
-                                                </svg>
-                                            ) : (
-                                                /* Lower third / subtitle icon (bottom bar with text lines) */
-                                                <svg className="w-7 h-7 text-[#FF0055]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                                                    <rect x="2" y="14" width="20" height="7" rx="2" />
-                                                    <line x1="5" y1="16.5" x2="19" y2="16.5" strokeLinecap="round" />
-                                                    <line x1="7" y1="19" x2="17" y2="19" strokeLinecap="round" />
-                                                </svg>
-                                            )}
-                                        </div>
-                                        <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-[#FF0055] flex items-center justify-center">
-                                            <span className="text-[10px] text-white font-bold">
-                                                {progress?.currentOverlay || progress?.currentLowerThird || 1}
-                                            </span>
-                                        </div>
-                                    </div>
+                                /* Overlays Generation - Clean Unified Design */
+                                (() => {
+                                    // Calculate total progress: (completed overlays + current progress) / total
+                                    const currentOverlay = progress?.currentOverlay || 1;
+                                    const totalOverlays = progress?.totalOverlays || 1;
+                                    const currentRenderProgress = progress?.renderProgress || 0;
+                                    const completedOverlays = currentOverlay - 1;
+                                    const totalProgress = Math.round(((completedOverlays * 100) + currentRenderProgress) / totalOverlays);
+                                    
+                                    return (
+                                        <>
+                                            {/* Total Progress Percentage */}
+                                            <div className="text-6xl font-black text-white tracking-tighter">
+                                                {totalProgress}<span className="text-2xl text-[#666]">%</span>
+                                            </div>
 
-                                    {/* Status Text */}
-                                    <div className="mt-3 text-center">
-                                        <div className="text-white text-sm font-semibold">
-                                            {progress?.overlayType === 'mandatory_credit'
-                                                ? 'Mandatory Credit'
-                                                : progress?.overlayType === 'lower_third'
-                                                    ? 'Lower Third'
-                                                    : 'Generating Overlays'}
-                                        </div>
-                                        <div className="text-[#555] text-[11px] font-mono mt-1">
-                                            {progress?.currentOverlay || progress?.currentLowerThird || 1} / {progress?.totalOverlays || progress?.totalLowerThirds || totalSegments}
-                                            {progress?.segmentIndex && (
-                                                <span className="text-[#444] ml-1">
-                                                    &middot; Seg {progress.segmentIndex}
+                                            {/* Current Task Info */}
+                                            <div className="mt-3 flex items-center gap-2">
+                                                {/* Icon changes based on type */}
+                                                {progress?.overlayType === 'mandatory_credit' ? (
+                                                    <svg className="w-4 h-4 text-[#FF0055]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" />
+                                                    </svg>
+                                                ) : (
+                                                    <svg className="w-4 h-4 text-[#FF0055]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                        <rect x="2" y="14" width="20" height="7" rx="2" />
+                                                        <line x1="5" y1="17" x2="19" y2="17" strokeLinecap="round" />
+                                                    </svg>
+                                                )}
+                                                <span className="text-[#888] text-sm">
+                                                    {progress?.overlayType === 'mandatory_credit' ? 'Credit' : 'Lower Third'}
                                                 </span>
+                                                <span className="text-[#555] text-sm font-mono">
+                                                    {currentOverlay}/{totalOverlays}
+                                                </span>
+                                            </div>
+
+                                            {/* Current Text Preview */}
+                                            {(progress?.overlayText || progress?.lowerThirdText) && (
+                                                <div className="mt-2 max-w-[85%]">
+                                                    <p className="text-[#666] text-[11px] truncate text-center">
+                                                        {progress?.overlayText || progress?.lowerThirdText}
+                                                    </p>
+                                                </div>
                                             )}
-                                        </div>
-                                    </div>
 
-                                    {/* Current Text Preview */}
-                                    {(progress?.overlayText || progress?.lowerThirdText) && (
-                                        <div className="mt-2 max-w-[90%] px-3 py-1.5 bg-[#1a1a1a] rounded-lg border border-[#333]">
-                                            <p className="text-[#888] text-[10px] truncate text-center font-mono">
-                                                "{progress?.overlayText || progress?.lowerThirdText}"
-                                            </p>
-                                        </div>
-                                    )}
-
-                                    {/* Animated Indicator */}
-                                    <div className="mt-3 flex items-center gap-2">
-                                        <div className="w-1.5 h-1.5 rounded-full bg-[#FF0055] animate-pulse" />
-                                        <span className="text-[#555] text-[10px]">Rendering...</span>
-                                    </div>
-                                </>
+                                            {/* Rendering Indicator */}
+                                            <div className="mt-4 flex items-center gap-2">
+                                                <div className="w-2 h-2 rounded-full bg-[#FF0055] animate-pulse" />
+                                                <span className="text-[#555] text-xs">Generating overlays</span>
+                                            </div>
+                                        </>
+                                    );
+                                })()
                             ) : (
                                 /* Encoding State - Animated */
                                 <>
@@ -306,20 +300,34 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
                     {/* Progress Bar Section */}
                     <div className="p-5 space-y-4 border-t border-[#1a1a1a]">
-                        {/* Progress Bar */}
+                        {/* Progress Bar - Unified style */}
                         <div className="space-y-2">
                             <div className="w-full h-2 bg-[#1a1a1a] rounded-full overflow-hidden">
-                                <div
-                                    className="h-full rounded-full transition-all duration-300 ease-out"
-                                    style={{
-                                        width: `${percent}%`,
-                                        background: isComplete
-                                            ? '#30D158'
-                                            : isError
-                                                ? '#ef4444'
-                                                : 'linear-gradient(90deg, #FF0055, #FF3377)'
-                                    }}
-                                />
+                                {(() => {
+                                    // Calculate progress based on stage
+                                    let barProgress = percent;
+                                    if (progress?.stage === 'generating_overlays' || progress?.stage === 'generating_lower_thirds') {
+                                        const currentOverlay = progress?.currentOverlay || 1;
+                                        const totalOverlays = progress?.totalOverlays || 1;
+                                        const currentRenderProgress = progress?.renderProgress || 0;
+                                        const completedOverlays = currentOverlay - 1;
+                                        barProgress = Math.round(((completedOverlays * 100) + currentRenderProgress) / totalOverlays);
+                                    }
+                                    
+                                    return (
+                                        <div
+                                            className="h-full rounded-full transition-all duration-150 ease-out"
+                                            style={{
+                                                width: `${barProgress}%`,
+                                                background: isComplete
+                                                    ? '#30D158'
+                                                    : isError
+                                                        ? '#ef4444'
+                                                        : 'linear-gradient(90deg, #FF0055, #FF3377)'
+                                            }}
+                                        />
+                                    );
+                                })()}
                             </div>
                         </div>
 

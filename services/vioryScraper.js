@@ -43,7 +43,8 @@ class VioryScraper {
             this.initPromise = (async () => {
                 const executablePath = getChromiumExecutablePath();
                 const launchOptions = {
-                    headless: true,
+                    headless: true, // New Headless mode
+                    channel: 'chromium', // Force using the installed chromium
                     args: [
                         '--no-sandbox',
                         '--disable-setuid-sandbox',
@@ -55,6 +56,7 @@ class VioryScraper {
 
                 if (executablePath) {
                     launchOptions.executablePath = executablePath;
+                    delete launchOptions.channel; // If path provided, don't set channel
                 }
 
                 this.browser = await chromium.launch(launchOptions);

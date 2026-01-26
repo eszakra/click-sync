@@ -29,3 +29,50 @@ remotion-bundle/
 *.sw?
 
 remotion-bundle
+
+# Environment and secrets
+.env
+.env.*
+viory-cookies.json
+
+# Test files
+test-*.cjs
+test-*.js
+test-data/
+test-output/
+downloads/
+temp-check/
+
+# Backups and checkpoints
+__BACKUP*/
+__CHECKPOINT*/
+__WORKING_BUILD*/
+
+# Development artifacts
+nul
+opencode.json
+mcp-chrome-devtools/
+
+# Unused electron files
+electron/lower-third.html
+electron/offscreenRenderer.cjs
+
+# Unused services
+services/browser/
+services/overlayPreRenderService.js
+
+# Test downloads
+test-download-xi/
+
+# Claude artifacts
+.claude/
+
+# Documentation and prompts (dev only)
+__CONTEXT*.md
+*_prompt.md
+*_guide.md
+*_errors.txt
+errors_v*.txt
+build_log.txt
+compile_errors.txt
+tsc_errors.txt

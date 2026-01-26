@@ -132,13 +132,24 @@ export const alignScriptDeterministic = async (
             }
         }
 
-        // Validate Match
+        // Validate Match with detailed logging
         let startIndex = searchIndex; // Default to previous end if totally lost (fallback)
-        if (bestStartMatch.score > 0.4) {
+        let startConfidence: 'high' | 'medium' | 'low' = 'low';
+        
+        if (bestStartMatch.score > 0.7) {
             startIndex = bestStartMatch.index;
+            startConfidence = 'high';
+        } else if (bestStartMatch.score > 0.4) {
+            startIndex = bestStartMatch.index;
+            startConfidence = 'medium';
+            console.warn(`[Matcher] Medium confidence start (${bestStartMatch.score.toFixed(2)}) for segment: "${seg.title.substring(0, 30)}..."`);
         } else {
-            console.warn(`Low confidence start for segment: ${seg.title}`);
+            // Low confidence - use fallback but log warning
+            startConfidence = 'low';
+            console.warn(`[Matcher] LOW confidence start (${bestStartMatch.score.toFixed(2)}) for segment: "${seg.title.substring(0, 30)}..." - using fallback position ${searchIndex}`);
         }
+        
+        console.log(`[Matcher] Segment ${segIdx + 1}/${segments.length}: "${seg.title.substring(0, 25)}..." - Start match: score=${bestStartMatch.score.toFixed(2)}, confidence=${startConfidence}, index=${startIndex}`);
 
         // SAFETY CHECK: Prevent crash if script overrides audio length
         if (!words[startIndex]) {
@@ -170,22 +181,38 @@ export const alignScriptDeterministic = async (
             }
         }
 
-        // Fallback for end
+        // Fallback for end with detailed logging
         let endIndex = -1;
-        if (bestEndMatch.score > 0.4) {
+        let endConfidence: 'high' | 'medium' | 'low' = 'low';
+        
+        if (bestEndMatch.score > 0.7) {
             endIndex = bestEndMatch.index;
+            endConfidence = 'high';
+        } else if (bestEndMatch.score > 0.4) {
+            endIndex = bestEndMatch.index;
+            endConfidence = 'medium';
+            console.warn(`[Matcher] Medium confidence end (${bestEndMatch.score.toFixed(2)}) for segment: "${seg.title.substring(0, 30)}..."`);
         } else {
-            // If we can't find the end, we might assume it goes until the next segment starts.
-            // We can retroactively fix this.
-            endIndex = words.length - 1; // Temporary: end of file
+            // If we can't find the end, use end of file as fallback
+            endIndex = words.length - 1;
+            endConfidence = 'low';
+            console.warn(`[Matcher] LOW confidence end (${bestEndMatch.score.toFixed(2)}) for segment: "${seg.title.substring(0, 30)}..." - using fallback (end of audio)`);
         }
+        
+        const segmentDuration = (words[endIndex].end - words[startIndex].start) / 1000;
+        console.log(`[Matcher] Segment ${segIdx + 1}: End match: score=${bestEndMatch.score.toFixed(2)}, confidence=${endConfidence}, duration=${segmentDuration.toFixed(2)}s`);
 
-        // Store Result
+        // Store Result with confidence metadata
         result.push({
             title: seg.title,
-            text: seg.text, // Pass text through
+            text: seg.text,
             start_time: words[startIndex].start / 1000,
-            end_time: words[endIndex].end / 1000
+            end_time: words[endIndex].end / 1000,
+            // @ts-ignore - Adding metadata for debugging
+            _matchConfidence: {
+                start: { score: bestStartMatch.score, confidence: startConfidence },
+                end: { score: bestEndMatch.score, confidence: endConfidence }
+            }
         });
 
         // Update Global Search Index for next iteration

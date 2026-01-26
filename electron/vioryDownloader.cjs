@@ -6,6 +6,7 @@ const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
 const { app } = require('electron');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // Priority keywords for smart video matching
 const PRIORITY_KEYWORDS = ['speech', 'address', 'statement', 'interview', 'remarks', 'talking', 'speaks', 'announces'];
@@ -70,9 +71,23 @@ class VioryDownloader {
                 '--no-sandbox', 
                 '--disable-setuid-sandbox', 
                 '--disable-dev-shm-usage',
-                '--start-minimized'  // Start minimized to avoid showing about:blank
+                '--start-minimized',
+                // RAM optimization flags
+                '--disable-gpu',                          // Disable GPU (not needed for scraping)
+                '--disable-software-rasterizer',          // Reduce memory usage
+                '--disable-extensions',                   // No extensions needed
+                '--disable-background-networking',        // Reduce background activity
+                '--disable-default-apps',                 // No default apps
+                '--disable-sync',                         // No sync needed
+                '--disable-translate',                    // No translation needed
+                '--metrics-recording-only',               // Minimal metrics
+                '--mute-audio',                           // No audio needed
+                '--no-first-run',                         // Skip first run
+                '--safebrowsing-disable-auto-update',     // No safe browsing updates
+                '--js-flags=--max-old-space-size=2048'    // Limit JS heap to 2GB
             ]
         });
+        console.log('[VioryDownloader] Browser launched with RAM optimization flags');
 
         this.context = await this.browser.newContext({
             viewport: { width: 1400, height: 900 },
@@ -595,7 +610,36 @@ class VioryDownloader {
                 if (!success) continue;
 
                 try {
+                    // STEP 1: Expand "Shot list" section (required to access content)
+                    const shotListExpanded = await page.evaluate(() => {
+                        const allElements = document.querySelectorAll('*');
+                        for (const el of allElements) {
+                            if (el.childNodes.length === 1 && el.textContent.trim() === 'Shot list') {
+                                // Found the header, look for the next button sibling
+                                let sibling = el.nextElementSibling;
+                                if (sibling && sibling.tagName === 'BUTTON') {
+                                    sibling.click();
+                                    return true;
+                                }
+                                // Or check parent's next sibling
+                                const parent = el.parentElement;
+                                if (parent) {
+                                    sibling = parent.nextElementSibling;
+                                    if (sibling && sibling.tagName === 'BUTTON') {
+                                        sibling.click();
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                        return false;
+                    });
+                    
+                    if (shotListExpanded) {
+                        await page.waitForTimeout(500); // Wait for expansion animation
+                    }
 
+                    // STEP 2: Extract metadata
                     const metadata = await page.evaluate(() => {
                         const result = {
                             title: '',
@@ -607,60 +651,111 @@ class VioryDownloader {
                             allText: ''
                         };
 
+                        // TITLE - from H1 with fallbacks
                         const h1 = document.querySelector('h1');
                         if (h1) result.title = h1.innerText.trim();
 
-                        // Fallback Title Extraction
                         if (!result.title) {
                             const metaTitle = document.querySelector('meta[property="og:title"]');
                             if (metaTitle) result.title = metaTitle.getAttribute('content');
                         }
                         if (!result.title) {
-                            result.title = document.title.replace('| Viory', '').trim();
+                            result.title = document.title.replace('| Viory', '').replace('| Video Viory', '').trim();
                         }
 
-                        const sections = document.querySelectorAll('div, section, p, span');
-                        sections.forEach(section => {
-                            const text = section.innerText || '';
-                            if (text.includes('VIDEO INFO') || text.includes('Video Info')) {
-                                const infoMatch = text.match(/VIDEO INFO[\s\S]*?(?=(SHOT LIST|$))/i);
-                                if (infoMatch) result.videoInfo = infoMatch[0].replace(/VIDEO INFO/i, '').trim().substring(0, 800);
+                        // Get full page text
+                        const bodyText = document.body.innerText;
+                        result.allText = bodyText.substring(0, 5000);
+
+                        // VIDEO INFO - Extract paragraphs between title and "Shot list"
+                        const shotListIndex = bodyText.indexOf('Shot list');
+                        if (shotListIndex !== -1) {
+                            const titleIndex = bodyText.indexOf(result.title);
+                            if (titleIndex !== -1) {
+                                let videoInfoRaw = bodyText.substring(titleIndex + result.title.length, shotListIndex);
+                                // Clean up navigation/UI text
+                                videoInfoRaw = videoInfoRaw
+                                    .replace(/Download video/gi, '')
+                                    .replace(/Link copied!/gi, '')
+                                    .replace(/Copy Link/gi, '')
+                                    .replace(/\d{1,2}:\d{2}\s*(GMT|UTC)?[+-]?\d{0,4}/g, '')
+                                    .trim();
+                                
+                                // Extract meaningful paragraphs (more than 50 chars)
+                                const paragraphs = videoInfoRaw.split(/\n+/).filter(p => p.trim().length > 50);
+                                result.videoInfo = paragraphs.slice(0, 6).join('\n\n').substring(0, 2000);
                             }
-                            if (text.includes('SHOT LIST') || text.includes('Shot List')) {
-                                const shotMatch = text.match(/SHOT LIST[\s\S]*/i);
-                                if (shotMatch) result.shotList = shotMatch[0].replace(/SHOT LIST/i, '').trim().substring(0, 1000);
-                            }
-                            // Extract Mandatory credit
-                            if (text.includes('Mandatory credit') || text.includes('mandatory credit') || text.includes('MANDATORY CREDIT')) {
-                                const creditMatch = text.match(/[Mm]andatory\s*credit\s*[:\s]\s*([^;\/\n]+)/i);
-                                if (creditMatch && creditMatch[1]) {
-                                    // Clean the credit text - take only the main credit, stop at delimiters
-                                    let credit = creditMatch[1].trim();
-                                    // Remove any trailing punctuation or extra text after semicolon
-                                    credit = credit.replace(/[;].*$/, '').trim();
-                                    // Only use if it's reasonable length (not too short or too long)
-                                    if (credit.length >= 3 && credit.length <= 100 && !result.mandatoryCredit) {
-                                        result.mandatoryCredit = credit;
-                                    }
+                        }
+
+                        // SHOT LIST - Simple extraction between "Shot list" and "Meta data"
+                        if (shotListIndex !== -1) {
+                            const metaDataIndex = bodyText.indexOf('Meta data');
+                            if (metaDataIndex !== -1 && metaDataIndex > shotListIndex) {
+                                let shotText = bodyText.substring(shotListIndex + 9, metaDataIndex).trim();
+                                // Remove any "Expand"/"Collapse" text at the start
+                                shotText = shotText.replace(/^(Expand|Collapse)\s*/i, '').trim();
+                                
+                                if (shotText.length > 20) {
+                                    result.shotList = shotText.substring(0, 2000);
                                 }
                             }
-                        });
+                        }
+                        
+                        // Fallback: Look for shot type patterns if no content found
+                        if (!result.shotList || result.shotList.length < 30) {
+                            const patterns = [
+                                /VARIOUS[,:\s]+[^\n]{10,300}/gi,
+                                /SOT[,:\s]+[^\n]{10,300}/gi,
+                                /[WMC]\/S[,:\s]+[^\n]{5,200}/gi
+                            ];
+                            for (const pattern of patterns) {
+                                const matches = bodyText.match(pattern);
+                                if (matches && matches.length > 0) {
+                                    result.shotList = matches.join('\n').substring(0, 2000);
+                                    break;
+                                }
+                            }
+                        }
 
+                        // MANDATORY CREDIT
+                        // Extract only the credit name, not usage restrictions
+                        // Examples: "World Economic Forum; News use only" → "World Economic Forum"
+                        //           "World Economic Forum/News use only" → "World Economic Forum"
+                        //           "Palazzo Chigi" → "Palazzo Chigi"
+                        const creditMatch = bodyText.match(/[Mm]andatory\s*credit[:\s]+([^\n]+)/);
+                        if (creditMatch && creditMatch[1]) {
+                            let credit = creditMatch[1].trim();
+                            // Remove everything after common separators (restrictions, usage info, etc.)
+                            credit = credit.replace(/[;].*$/, '').trim();       // Remove after semicolon ;
+                            credit = credit.replace(/\/[A-Z].*$/i, '').trim();  // Remove after /UpperCase (like /News)
+                            credit = credit.replace(/\s*\/-.*$/, '').trim();    // Remove after /-
+                            credit = credit.replace(/\s*\/\s*-.*$/, '').trim(); // Remove after / -
+                            credit = credit.replace(/\s+-\s+.*$/, '').trim();   // Remove after " - " 
+                            // Clean up any trailing punctuation or slashes
+                            credit = credit.replace(/[.,;:\/]+$/, '').trim();
+                            if (credit.length >= 3 && credit.length <= 100) {
+                                result.mandatoryCredit = credit;
+                            }
+                        }
+
+                        // DURATION - from Meta data section
+                        const durationMatch = bodyText.match(/Duration[\s:]*(\d{1,2}:\d{2})/i);
+                        if (durationMatch) {
+                            result.duration = durationMatch[1];
+                        } else {
+                            const simpleDuration = bodyText.match(/\d{1,2}:\d{2}/);
+                            if (simpleDuration) result.duration = simpleDuration[0];
+                        }
+
+                        // Extract description from meta
                         const metaDesc = document.querySelector('meta[name="description"]');
                         if (metaDesc) result.description = metaDesc.content;
 
-                        const durationMatch = document.body.innerText.match(/\d+:\d{2}/);
-                        if (durationMatch) result.duration = durationMatch[0];
-
-                        result.allText = document.body.innerText.substring(0, 5000);
                         return result;
                     });
 
-                    // FIXED: Calculate score OUTSIDE page.evaluate() where 'this' is valid
+                    // Calculate score
                     const score = this.calculateRelevance(finalQuery, metadata);
-
-                    // DEBUG: Log mandatory credit extraction
-                    console.log(`   > [DEBUG] mandatoryCredit extracted: "${metadata.mandatoryCredit || '(empty)'}"`);
 
                     analyzedVideos.push({
                         ...candidate,
@@ -668,11 +763,15 @@ class VioryDownloader {
                         score
                     });
 
-                    console.log(`   > Score: ${score.total} (Title: "${metadata.title.substring(0, 30)}...")`);
+                    // Log extracted metadata
+                    console.log(`   > Score: ${score.total} | Title: "${metadata.title.substring(0, 40)}..."`);
+                    console.log(`   > VideoInfo: ${metadata.videoInfo ? `${metadata.videoInfo.length} chars` : '(empty)'}`);
+                    console.log(`   > ShotList: ${metadata.shotList ? `${metadata.shotList.length} chars` : '(empty)'}`);
+                    if (metadata.shotList) {
+                        console.log(`   > 📋 Shot preview: "${metadata.shotList.substring(0, 100)}..."`);
+                    }
                     if (metadata.mandatoryCredit) {
                         console.log(`   > ✅ MandatoryCredit: "${metadata.mandatoryCredit}"`);
-                    } else {
-                        console.log(`   > ⚠️ No MandatoryCredit found on this page`);
                     }
 
                 } catch (e) {
@@ -898,6 +997,1278 @@ class VioryDownloader {
     }
 
     /**
+     * INTELLIGENT VIDEO SEARCH PIPELINE
+     * Complete 6-stage pipeline with Gemini analysis and visual validation
+     * Exact copy of test-intelligent-search.cjs logic that produced good results
+     * 
+     * @param {string} headline - News segment headline
+     * @param {string} text - News segment text/description
+     * @param {string} geminiApiKey - Gemini API key
+     * @param {Object} options - Search options
+     * @param {Buffer} options.segmentFrame - Optional screenshot/frame from the segment
+     * @returns {Object} Best matching video with full analysis
+     */
+    async intelligentSearch(headline, text, geminiApiKey, options = {}) {
+        const {
+            maxQueries = 5,
+            maxVideosToAnalyze = 5,
+            topNForVisualValidation = 3,
+            segmentFrame = null,  // Screenshot from the news segment
+            onProgress = () => {}
+        } = options;
+
+        console.log('\n' + '='.repeat(70));
+        console.log('INTELLIGENT VIDEO SEARCH PIPELINE');
+        console.log('='.repeat(70));
+        console.log(`Headline: "${headline}"`);
+
+        const results = {
+            analysis: null,
+            videos: [],
+            winner: null,
+            timings: {}
+        };
+
+        const startTotal = Date.now();
+
+        try {
+            // ================================================================
+            // STAGE 1: GEMINI ANALYSIS - Generate smart queries
+            // ================================================================
+            console.log('\n[STAGE 1] Gemini Analysis...');
+            onProgress({ stage: 1, message: 'Analyzing segment with Gemini...' });
+            const startStage1 = Date.now();
+
+            const genAI = new GoogleGenerativeAI(geminiApiKey);
+            // Use gemini-3-flash for text/query generation (smarter)
+            const textModel = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+            // Use gemini-2.5-flash for vision/image analysis (optimized for images)
+            const visionModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+
+            const analysisPrompt = `You are an expert news video researcher. Analyze this news segment to find the best matching B-roll footage.
+
+SEGMENT TO ANALYZE:
+Headline: "${headline}"
+Text: "${text}"
+
+TASK: Generate search queries that will find RELEVANT VIDEO FOOTAGE on a news video platform.
+
+IMPORTANT RULES:
+1. Focus on the MAIN VISUAL SUBJECT - what should viewers SEE in the video
+2. Generate queries from MOST SPECIFIC to MOST GENERIC
+3. Each query should be 1-3 words (platform search works better with short queries)
+4. Include the country name in relevant queries
+
+PERSON DETECTION - CRITICAL:
+- Identify if there is an IMPORTANT PERSON mentioned (politician, leader, celebrity, executive, etc.)
+- If a specific person is mentioned by name, they should appear in the B-roll footage
+- Set "has_important_person" to true if footage MUST show a specific person
+- Set "person_name" to the full name of the person who must appear
+- Set "person_description" to describe how they look or their role (e.g., "older man with white hair", "female politician")
+
+OUTPUT JSON ONLY:
+{
+  "main_subject": "What the video should primarily show",
+  "country": "Primary country involved",
+  "has_important_person": true/false,
+  "person_name": "Full name of person who must appear (or null)",
+  "person_description": "Description of the person's appearance/role (or null)",
+  "key_visuals": ["visual1", "visual2", "visual3"],
+  "must_show": ["essential element 1", "essential element 2"],
+  "avoid": ["what would be wrong"],
+  "queries": ["query1", "query2", "query3", "query4", "query5", "query6", "query7", "query8"]
+}`;
+
+            const analysisResult = await textModel.generateContent(analysisPrompt);
+            const analysisText = analysisResult.response.text().replace(/```json\n?|```/g, '').trim();
+            const analysis = JSON.parse(analysisText);
+            results.analysis = analysis;
+
+            results.timings.stage1 = Date.now() - startStage1;
+            console.log(`   Main Subject: ${analysis.main_subject}`);
+            console.log(`   Country: ${analysis.country}`);
+            console.log(`   Key Visuals: ${analysis.key_visuals?.join(', ')}`);
+            console.log(`   Must Show: ${analysis.must_show?.join(', ')}`);
+            console.log(`   Queries: ${analysis.queries?.join(', ')}`);
+            
+            // Log person detection
+            if (analysis.has_important_person) {
+                console.log(`   [PERSON DETECTED] ${analysis.person_name}`);
+                console.log(`   [PERSON DESCRIPTION] ${analysis.person_description}`);
+            } else {
+                console.log(`   [NO SPECIFIC PERSON] Looking for general footage`);
+            }
+            console.log(`   Time: ${results.timings.stage1}ms`);
+
+            // Send detailed AI analysis to UI with person detection info
+            const personInfo = analysis.has_important_person 
+                ? `[PERSONA: ${analysis.person_name}] ` 
+                : '[FOOTAGE GENERAL] ';
+            
+            onProgress({ 
+                stage: 1, 
+                message: `${personInfo}Subject: "${analysis.main_subject}" | Looking for: ${analysis.key_visuals?.slice(0, 2).join(', ')}`,
+                analysis: analysis,
+                personDetected: analysis.has_important_person,
+                personName: analysis.person_name,
+                personDescription: analysis.person_description
+            });
+
+            // ================================================================
+            // STAGE 1.5: PERSON IDENTIFICATION IN SEGMENT FRAME (if provided)
+            // Simple check: Is this [person_name]? Yes/No
+            // ================================================================
+            let segmentPersonConfirmed = null;  // null = no frame, true = person confirmed, false = not that person or no person
+            
+            if (segmentFrame && analysis.has_important_person && analysis.person_name) {
+                console.log('\n[STAGE 1.5] Person Identification in Segment...');
+                console.log(`   Checking if segment shows: ${analysis.person_name}`);
+                onProgress({ stage: 1.5, message: `Verificando si el segmento muestra a ${analysis.person_name}...` });
+                const startStage15 = Date.now();
+                
+                try {
+                    // Simple direct question: Is this person X?
+                    const identifyPrompt = `Look at this image. Is the person shown "${analysis.person_name}"?
+
+Answer with JSON only:
+{
+  "is_this_person": true/false,
+  "confidence": 0.0-1.0,
+  "who_is_shown": "Name of person if you can identify them, or 'unknown'"
+}`;
+
+                    const identifyResult = await visionModel.generateContent([
+                        { inlineData: { mimeType: 'image/png', data: segmentFrame.toString('base64') } },
+                        identifyPrompt
+                    ]);
+
+                    const identifyText = identifyResult.response.text().replace(/```json\n?|```/g, '').trim();
+                    const identification = JSON.parse(identifyText);
+                    
+                    segmentPersonConfirmed = identification.is_this_person === true && identification.confidence >= 0.7;
+                    
+                    results.segmentPersonCheck = {
+                        expectedPerson: analysis.person_name,
+                        isConfirmed: segmentPersonConfirmed,
+                        confidence: identification.confidence,
+                        actualPerson: identification.who_is_shown
+                    };
+
+                    results.timings.stage15 = Date.now() - startStage15;
+                    
+                    // Log result
+                    if (segmentPersonConfirmed) {
+                        console.log(`   [CONFIRMADO] El segmento muestra a ${analysis.person_name} (${(identification.confidence * 100).toFixed(0)}% seguro)`);
+                    } else {
+                        console.log(`   [NO CONFIRMADO] No es ${analysis.person_name}. Detectado: ${identification.who_is_shown}`);
+                    }
+                    console.log(`   Time: ${results.timings.stage15}ms`);
+
+                    // Send to UI
+                    onProgress({ 
+                        stage: 1.5, 
+                        message: segmentPersonConfirmed 
+                            ? `[CONFIRMADO] Segmento muestra a ${analysis.person_name} - B-roll debe mostrar la misma persona`
+                            : `[INFO] Persona en segmento: ${identification.who_is_shown || 'no identificada'}`,
+                        personConfirmed: segmentPersonConfirmed,
+                        expectedPerson: analysis.person_name,
+                        detectedPerson: identification.who_is_shown,
+                        confidence: identification.confidence
+                    });
+
+                } catch (error) {
+                    console.error(`   Person identification failed: ${error.message}`);
+                    onProgress({ 
+                        stage: 1.5, 
+                        message: `Identificacion fallida: ${error.message?.substring(0, 50)}`,
+                        error: true
+                    });
+                }
+            } else if (segmentFrame) {
+                console.log('\n[STAGE 1.5] Skipped - No specific person to verify');
+                onProgress({ stage: 1.5, message: 'No hay persona especifica que verificar - usando matching de footage' });
+            } else {
+                console.log('\n[STAGE 1.5] Skipped - No segment frame provided');
+                onProgress({ stage: 1.5, message: 'Sin frame del segmento - usando solo analisis de texto' });
+            }
+
+            // Store for use in Stage 5
+            results.segmentPersonConfirmed = segmentPersonConfirmed;
+
+            // ================================================================
+            // STAGE 2: VIORY SEARCH - Search with generated queries
+            // ================================================================
+            console.log('\n[STAGE 2] Viory Search...');
+            const startStage2 = Date.now();
+
+            const page = await this.ensurePage();
+            const allVideos = [];
+            const seenUrls = new Set();
+            const country = (analysis.country || '').toLowerCase();
+            const queriesToUse = analysis.queries.slice(0, maxQueries);
+            
+            onProgress({ stage: 2, message: `Searching with ${queriesToUse.length} queries...` });
+
+            // Track which query index each video came from (lower = more specific = higher priority)
+            let queryIndex = 0;
+            
+            for (const query of queriesToUse) {
+                console.log(`   Searching: "${query}"`);
+                onProgress({ stage: 2, message: `Searching: "${query}"` });
+
+                try {
+                    const searchUrl = `https://www.viory.video/en/videos?search=${encodeURIComponent(query)}`;
+                    console.log(`      URL: ${searchUrl}`);
+                    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+                    console.log(`      Page loaded`);
+
+                    try {
+                        await page.waitForSelector('a[href*="/videos/"]', { timeout: 8000 });
+                        console.log(`      Found video links`);
+                    } catch (e) {
+                        console.log(`      No results for "${query}" (selector timeout)`);
+                        const pageContent = await page.evaluate(() => document.body.innerText.substring(0, 500));
+                        console.log(`      Page content preview: ${pageContent.substring(0, 200)}...`);
+                        queryIndex++;
+                        continue;
+                    }
+
+                    await page.waitForTimeout(500);
+
+                    // Get results with titles
+                    const searchResults = await page.evaluate(() => {
+                        const videos = [];
+                        const links = document.querySelectorAll('a[href*="/videos/"]');
+                        
+                        links.forEach(link => {
+                            const href = link.getAttribute('href');
+                            if (!href || href.endsWith('/videos') || href.endsWith('/videos/') || href.includes('?')) return;
+                            
+                            const container = link.closest('article, [class*="card"], div');
+                            let title = '';
+                            const h2 = container?.querySelector('h2, h3');
+                            if (h2) title = h2.innerText.trim();
+                            if (!title) title = link.innerText.trim().split('\n')[0];
+                            
+                            const fullUrl = href.startsWith('http') ? href : `https://www.viory.video${href}`;
+                            
+                            if (title && !videos.some(v => v.url === fullUrl)) {
+                                videos.push({ url: fullUrl, title: title.substring(0, 200) });
+                            }
+                        });
+                        
+                        return videos.slice(0, 8);
+                    });
+
+                    console.log(`      Found ${searchResults.length} results`);
+                    
+                    // Debug: show first few results
+                    if (searchResults.length > 0) {
+                        console.log(`      First results: ${searchResults.slice(0, 3).map(v => v.title.substring(0, 40)).join(', ')}`);
+                    }
+
+                    // ADD ALL RESULTS - no filtering here, let text scoring decide
+                    // But mark with queryIndex for priority (first query = most specific)
+                    for (const video of searchResults) {
+                        if (!seenUrls.has(video.url)) {
+                            seenUrls.add(video.url);
+                            allVideos.push({ 
+                                ...video, 
+                                sourceQuery: query,
+                                queryPriority: queryIndex  // 0 = first query = highest priority
+                            });
+                        }
+                    }
+                } catch (error) {
+                    console.error(`      Search error: ${error.message}`);
+                }
+                queryIndex++;
+            }
+            
+            // SORT BY QUERY PRIORITY - videos from first (most specific) query come first
+            allVideos.sort((a, b) => a.queryPriority - b.queryPriority);
+            console.log(`   Sorted ${allVideos.length} videos by query priority`);
+
+            results.timings.stage2 = Date.now() - startStage2;
+            console.log(`   Total unique videos: ${allVideos.length}`);
+            console.log(`   Time: ${results.timings.stage2}ms`);
+
+            if (allVideos.length === 0) {
+                console.log('   No videos found!');
+                return results;
+            }
+
+            // ================================================================
+            // STAGE 3: DEEP VIDEO ANALYSIS - Extract metadata + screenshots
+            // ================================================================
+            console.log('\n[STAGE 3] Deep Video Analysis...');
+            onProgress({ stage: 3, message: `Extracting metadata from ${Math.min(allVideos.length, maxVideosToAnalyze)} videos...` });
+            const startStage3 = Date.now();
+
+            const videosToAnalyze = allVideos.slice(0, maxVideosToAnalyze);
+
+            for (let i = 0; i < videosToAnalyze.length; i++) {
+                const video = videosToAnalyze[i];
+                const shortTitle = (video.title || '').substring(0, 40);
+                console.log(`   [${i + 1}/${videosToAnalyze.length}] ${shortTitle}...`);
+                onProgress({ 
+                    stage: 3, 
+                    message: `[${i + 1}/${videosToAnalyze.length}] Extracting: "${shortTitle}..."`,
+                    current: i + 1,
+                    total: videosToAnalyze.length
+                });
+
+                try {
+                    await page.goto(video.url, { waitUntil: 'networkidle', timeout: 25000 });
+                    await page.waitForSelector('h1', { timeout: 5000 }).catch(() => {});
+                    await page.waitForTimeout(800);
+
+                    // Expand Shot list section
+                    const shotListExpanded = await page.evaluate(() => {
+                        const allElements = document.querySelectorAll('*');
+                        for (const el of allElements) {
+                            if (el.childNodes.length === 1 && el.textContent.trim() === 'Shot list') {
+                                let sibling = el.nextElementSibling;
+                                if (sibling && sibling.tagName === 'BUTTON') {
+                                    sibling.click();
+                                    return true;
+                                }
+                                const parent = el.parentElement;
+                                if (parent) {
+                                    sibling = parent.nextElementSibling;
+                                    if (sibling && sibling.tagName === 'BUTTON') {
+                                        sibling.click();
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                        return false;
+                    });
+                    
+                    if (shotListExpanded) {
+                        console.log(`      Shot list expanded`);
+                        await page.waitForTimeout(500);
+                    }
+
+                    // Extract metadata - EXACT COPY FROM TEST
+                    const metadata = await page.evaluate(() => {
+                        const result = {
+                            title: '',
+                            videoInfo: '',
+                            shotList: '',
+                            mandatoryCredit: '',
+                            duration: '',
+                            allText: ''
+                        };
+
+                        // TITLE
+                        const h1 = document.querySelector('h1');
+                        if (h1) result.title = h1.innerText.trim();
+                        if (!result.title) {
+                            const ogTitle = document.querySelector('meta[property="og:title"]');
+                            if (ogTitle) result.title = ogTitle.getAttribute('content');
+                        }
+                        if (!result.title) {
+                            result.title = document.title.replace(/\s*\|.*$/, '').trim();
+                        }
+
+                        // Get full page text
+                        const bodyText = document.body.innerText;
+                        result.allText = bodyText.substring(0, 8000);
+
+                        // VIDEO INFO
+                        const titleEndIndex = bodyText.indexOf(result.title) + result.title.length;
+                        const shotListIndex = bodyText.indexOf('Shot list');
+                        
+                        if (titleEndIndex > 0) {
+                            let infoEndIndex = shotListIndex > titleEndIndex ? shotListIndex : bodyText.length;
+                            infoEndIndex = Math.min(infoEndIndex, titleEndIndex + 4000);
+                            
+                            let videoInfoRaw = bodyText.substring(titleEndIndex, infoEndIndex);
+                            videoInfoRaw = videoInfoRaw
+                                .replace(/^[\s\S]*?(Videos|Download video)[\s\n]*/i, '')
+                                .replace(/\d{1,2}:\d{2}\s*(GMT|UTC)?[+-]?\d{0,4}/g, '')
+                                .replace(/^(En|Videos|Live events|Pricing|About|Search)[\s\n]*/gm, '')
+                                .replace(/FOR SUBSCRIBERS ONLY/gi, '')
+                                .trim();
+                            
+                            const sentences = videoInfoRaw.split(/\n+/).filter(s => {
+                                const trimmed = s.trim();
+                                return trimmed.length > 50 && 
+                                       !trimmed.startsWith('©') &&
+                                       !trimmed.includes('cookie') &&
+                                       !trimmed.includes('Terms of');
+                            });
+                            
+                            result.videoInfo = sentences.slice(0, 6).join('\n\n').substring(0, 2500);
+                        }
+
+                        // SHOT LIST - between "Shot list" and "Meta data"
+                        if (shotListIndex !== -1) {
+                            const metaDataIndex = bodyText.indexOf('Meta data');
+                            if (metaDataIndex !== -1 && metaDataIndex > shotListIndex) {
+                                let shotText = bodyText.substring(shotListIndex + 9, metaDataIndex).trim();
+                                shotText = shotText.replace(/^(Expand|Collapse)\s*/i, '').trim();
+                                if (shotText.length > 20) {
+                                    result.shotList = shotText.substring(0, 2000);
+                                }
+                            }
+                        }
+
+                        // DURATION
+                        const durMatch = bodyText.match(/Duration[\s:]*(\d{1,2}:\d{2})/i);
+                        if (durMatch) result.duration = durMatch[1];
+
+                        // MANDATORY CREDIT
+                        // Extract only the credit name, not usage restrictions
+                        const creditMatch = bodyText.match(/[Mm]andatory\s*credit[:\s]+([^\n]+)/);
+                        if (creditMatch && creditMatch[1]) {
+                            let credit = creditMatch[1].trim();
+                            // Remove everything after common separators
+                            credit = credit.replace(/[;].*$/, '').trim();
+                            credit = credit.replace(/\/[A-Z].*$/i, '').trim();
+                            credit = credit.replace(/\s*\/-.*$/, '').trim();
+                            credit = credit.replace(/\s*\/\s*-.*$/, '').trim();
+                            credit = credit.replace(/\s+-\s+.*$/, '').trim();
+                            credit = credit.replace(/[.,;:\/]+$/, '').trim();
+                            if (credit.length >= 3 && credit.length <= 100) {
+                                result.mandatoryCredit = credit;
+                            }
+                        }
+
+                        return result;
+                    });
+
+                    Object.assign(video, metadata);
+
+                    // Capture screenshot
+                    try {
+                        const videoArea = await page.$('video, [class*="player"], [class*="video-container"], main img');
+                        if (videoArea) {
+                            const box = await videoArea.boundingBox();
+                            if (box && box.width > 200) {
+                                video.screenshot = await videoArea.screenshot({ type: 'png' });
+                            }
+                        }
+                        if (!video.screenshot) {
+                            video.screenshot = await page.screenshot({
+                                type: 'png',
+                                clip: { x: 300, y: 80, width: 900, height: 500 }
+                            });
+                        }
+                        console.log(`      Screenshot captured`);
+                    } catch (e) {
+                        console.log(`      Screenshot failed`);
+                    }
+
+                    console.log(`      VideoInfo: ${video.videoInfo ? `${video.videoInfo.length} chars` : 'empty'}`);
+                    console.log(`      ShotList: ${video.shotList ? `${video.shotList.length} chars` : 'empty'}`);
+                    if (video.shotList) {
+                        console.log(`      Shot preview: "${video.shotList.substring(0, 100)}..."`);
+                    }
+
+                } catch (error) {
+                    console.error(`      Error: ${error.message}`);
+                }
+            }
+
+            results.timings.stage3 = Date.now() - startStage3;
+            console.log(`   Time: ${results.timings.stage3}ms`);
+
+            // ================================================================
+            // STAGE 4: TEXT SCORING - EXACT COPY FROM TEST
+            // ================================================================
+            console.log('\n[STAGE 4] Text Scoring...');
+            onProgress({ stage: 4, message: `Scoring ${videosToAnalyze.length} videos by text relevance...` });
+            const startStage4 = Date.now();
+
+            for (const video of videosToAnalyze) {
+                let score = 0;
+                const content = (
+                    (video.title || '') + ' ' +
+                    (video.videoInfo || '') + ' ' +
+                    (video.shotList || '') + ' ' +
+                    (video.allText || '')
+                ).toLowerCase();
+
+                const titleLower = (video.title || '').toLowerCase();
+
+                // ============================================
+                // FOOTAGE/CONTEXT MATCHING (when no specific person)
+                // ============================================
+                
+                // MAIN SUBJECT MATCH - Most important for footage
+                if (analysis.main_subject && !analysis.has_important_person) {
+                    const subjectWords = analysis.main_subject.toLowerCase().split(' ').filter(w => w.length > 3);
+                    let subjectMatches = 0;
+                    subjectWords.forEach(word => {
+                        if (content.includes(word)) subjectMatches++;
+                    });
+                    if (subjectMatches >= 3) {
+                        score += 40; // Strong subject match
+                        console.log(`      [TEMA FUERTE] ${subjectMatches} palabras del tema encontradas`);
+                    } else if (subjectMatches >= 2) {
+                        score += 25;
+                        console.log(`      [TEMA PARCIAL] ${subjectMatches} palabras del tema encontradas`);
+                    } else if (subjectMatches >= 1) {
+                        score += 10;
+                    }
+                }
+
+                // Country match (important)
+                if (country && content.includes(country)) {
+                    score += 20;
+                    if (titleLower.includes(country)) score += 10;
+                    console.log(`      [PAIS] "${country}" encontrado`);
+                }
+
+                // Key visuals match - MORE WEIGHT for footage
+                let keyVisualsMatched = 0;
+                (analysis.key_visuals || []).forEach(visual => {
+                    const visualLower = visual.toLowerCase();
+                    if (content.includes(visualLower)) {
+                        score += 20; // Increased from 15
+                        keyVisualsMatched++;
+                    }
+                    // Also check individual words for compound visuals like "military convoy"
+                    const visualWords = visualLower.split(' ').filter(w => w.length > 3);
+                    visualWords.forEach(word => {
+                        if (content.includes(word) && !content.includes(visualLower)) {
+                            score += 8;
+                        }
+                    });
+                });
+                if (keyVisualsMatched > 0) {
+                    console.log(`      [VISUAL] ${keyVisualsMatched} key_visuals encontrados`);
+                }
+
+                // Must show match - CRITICAL for footage context
+                let mustShowMatched = 0;
+                (analysis.must_show || []).forEach(item => {
+                    const itemLower = item.toLowerCase();
+                    if (content.includes(itemLower)) {
+                        score += 30; // Full phrase match - very important
+                        mustShowMatched++;
+                    } else {
+                        const words = itemLower.split(' ').filter(w => w.length > 3);
+                        const matchedWords = words.filter(w => content.includes(w));
+                        if (matchedWords.length >= 2) {
+                            score += 20;
+                            mustShowMatched++;
+                        } else if (matchedWords.length === 1) {
+                            score += 10;
+                        }
+                    }
+                });
+                if (mustShowMatched > 0) {
+                    console.log(`      [MUST_SHOW] ${mustShowMatched} elementos requeridos encontrados`);
+                }
+
+                // Context-specific keywords (expanded beyond military)
+                const contextKeywords = {
+                    military: ['missile', 'drone', 'convoy', 'military', 'irgc', 'weapon', 'armed', 'forces', 'tank', 'soldier', 'troops', 'artillery', 'bombing', 'strike', 'attack', 'defense'],
+                    disaster: ['earthquake', 'flood', 'tsunami', 'hurricane', 'tornado', 'wildfire', 'fire', 'rescue', 'survivors', 'debris', 'destruction', 'damage', 'emergency'],
+                    protest: ['protest', 'demonstration', 'rally', 'march', 'riot', 'clash', 'police', 'tear gas', 'crowd', 'banner', 'activists'],
+                    economy: ['trade', 'tariff', 'economy', 'market', 'stock', 'inflation', 'gdp', 'export', 'import', 'deal', 'agreement', 'summit'],
+                    politics: ['election', 'vote', 'parliament', 'congress', 'senate', 'minister', 'president', 'government', 'policy', 'law', 'bill']
+                };
+                
+                // Check all context categories
+                let contextBonus = 0;
+                Object.values(contextKeywords).flat().forEach(kw => {
+                    if (content.includes(kw) && analysis.main_subject?.toLowerCase().includes(kw)) {
+                        contextBonus += 5; // Bonus only if keyword is relevant to the topic
+                    }
+                });
+                if (contextBonus > 0) {
+                    score += Math.min(contextBonus, 25); // Cap at 25
+                }
+
+                // Penalty for wrong content - only if clearly different topic
+                const wrongContent = ['zelensky', 'ukraine', 'russia', 'putin', 'biden', 'trump', 'gaza', 'israel', 'iran', 'china'];
+                wrongContent.forEach(wrong => {
+                    if (titleLower.includes(wrong) && !analysis.main_subject?.toLowerCase().includes(wrong) && !content.includes(analysis.main_subject?.toLowerCase().split(' ')[0] || '')) {
+                        score -= 25;
+                        console.log(`      [PENALIDAD] "${wrong}" en titulo pero no relacionado al tema`);
+                    }
+                });
+
+                // PERSON NAME MATCH - If segment mentions a person, check if video has that person
+                let personMatchInText = false;
+                if (analysis.has_important_person && analysis.person_name) {
+                    const personNameLower = analysis.person_name.toLowerCase();
+                    const nameParts = personNameLower.split(' ').filter(p => p.length >= 2); // Allow 2+ chars (for "He")
+                    
+                    // Check for FULL name match first (highest priority)
+                    if (content.includes(personNameLower)) {
+                        score += 60; // HUGE bonus for full name match
+                        personMatchInText = true;
+                        console.log(`      [PERSONA EXACTA] "${analysis.person_name}" encontrado completo`);
+                    } 
+                    // Check for surname/lastname match (usually last part of name)
+                    else if (nameParts.length > 1) {
+                        const lastName = nameParts[nameParts.length - 1]; // Last part is usually surname
+                        if (lastName.length >= 3 && content.includes(lastName)) {
+                            score += 50; // Big bonus for surname match
+                            personMatchInText = true;
+                            console.log(`      [PERSONA APELLIDO] "${lastName}" encontrado en video`);
+                        }
+                    }
+                    // Check for any significant name part
+                    else {
+                        const significantPart = nameParts.find(p => p.length >= 3 && content.includes(p));
+                        if (significantPart) {
+                            score += 40;
+                            personMatchInText = true;
+                            console.log(`      [PERSONA PARCIAL] "${significantPart}" encontrado en video`);
+                        }
+                    }
+                    
+                    // PENALTY if looking for specific person but video doesn't have them
+                    if (!personMatchInText) {
+                        score -= 20; // Penalty for missing the required person
+                        console.log(`      [SIN PERSONA] "${analysis.person_name}" NO encontrado - penalidad`);
+                    }
+                }
+
+                video.textScore = { score: Math.max(0, Math.min(100, score)), personMatchInText };
+                console.log(`   Score ${video.textScore.score}${personMatchInText ? ' [PERSONA]' : ''}: "${video.title.substring(0, 50)}..."`);
+            }
+
+            // Sort by text score
+            videosToAnalyze.sort((a, b) => b.textScore.score - a.textScore.score);
+
+            results.timings.stage4 = Date.now() - startStage4;
+            console.log(`   Time: ${results.timings.stage4}ms`);
+
+            // Send top 3 scores to UI
+            const top3 = videosToAnalyze.slice(0, 3);
+            onProgress({ 
+                stage: 4, 
+                message: `Top scores: ${top3.map(v => v.textScore.score).join(', ')} | Best: "${(top3[0]?.title || '').substring(0, 35)}..."`,
+                topScores: top3.map(v => ({ title: v.title?.substring(0, 30), score: v.textScore.score }))
+            });
+
+            // ================================================================
+            // STAGE 5: VISUAL VALIDATION with Gemini Vision
+            // SIMPLIFIED: Direct person check or footage relevance
+            // ================================================================
+            console.log('\n[STAGE 5] Visual Validation with Gemini Vision...');
+            
+            // Check if we need to match a specific person (confirmed in segment)
+            const requiresPersonMatch = results.segmentPersonConfirmed === true && analysis.person_name;
+            const personToMatch = analysis.person_name;
+            
+            if (requiresPersonMatch) {
+                console.log(`   [MODO PERSONA] Buscando videos que muestren a: ${personToMatch}`);
+            } else {
+                console.log(`   [MODO FOOTAGE] Buscando videos relevantes al tema`);
+            }
+            
+            onProgress({ 
+                stage: 5, 
+                message: requiresPersonMatch 
+                    ? `Buscando B-roll con ${personToMatch}...`
+                    : `Analizando ${topNForVisualValidation} videos por relevancia...`,
+                matchMode: requiresPersonMatch ? 'person' : 'footage',
+                personToMatch: personToMatch
+            });
+            const startStage5 = Date.now();
+
+            const topVideos = videosToAnalyze.slice(0, topNForVisualValidation);
+            let analyzedCount = 0;
+
+            for (let vi = 0; vi < topVideos.length; vi++) {
+                const video = topVideos[vi];
+                
+                if (!video.screenshot) {
+                    video.visualAnalysis = { success: false };
+                    onProgress({ 
+                        stage: 5, 
+                        message: `[${vi + 1}/${topVideos.length}] Sin screenshot`,
+                        videoTitle: video.title?.substring(0, 30)
+                    });
+                    continue;
+                }
+
+                const shortTitle = (video.title || '').substring(0, 35);
+                console.log(`   Validating: ${shortTitle}...`);
+                onProgress({ 
+                    stage: 5, 
+                    message: `[${vi + 1}/${topVideos.length}] ${requiresPersonMatch ? `Buscando a ${personToMatch}` : 'Verificando relevancia'}...`,
+                    videoTitle: shortTitle,
+                    current: vi + 1,
+                    total: topVideos.length
+                });
+
+                try {
+                    let visionPrompt;
+                    
+                    if (requiresPersonMatch) {
+                        // SIMPLE DIRECT QUESTION: Is this person in the video?
+                        visionPrompt = `Look at this video screenshot.
+
+QUESTION: Does this video show "${personToMatch}"?
+
+Video title: ${video.title}
+Video description: ${(video.videoInfo || '').substring(0, 200)}
+
+Answer with JSON only:
+{
+  "shows_person": true/false,
+  "person_identified": "Name of person you see (or 'unknown' or 'no person visible')",
+  "confidence": 0.0-1.0,
+  "relevance_score": 0-100
+}
+
+SCORING:
+- If you clearly see ${personToMatch} → relevance_score: 90-100
+- If you see someone who might be ${personToMatch} → relevance_score: 70-89
+- If you see a different person → relevance_score: 20-40
+- If no person visible but related content → relevance_score: 40-60`;
+                    } else {
+                        // FOOTAGE RELEVANCE CHECK - More detailed and context-aware
+                        visionPrompt = `You are an expert news B-roll matcher. Analyze if this video is relevant for the news topic.
+
+NEWS TOPIC: ${analysis.main_subject}
+COUNTRY/REGION: ${analysis.country || 'Not specified'}
+KEY VISUALS NEEDED: ${analysis.key_visuals?.join(', ') || 'General footage'}
+MUST SHOW: ${analysis.must_show?.join(', ') || 'Related content'}
+AVOID: ${analysis.avoid?.join(', ') || 'Nothing specific'}
+
+VIDEO BEING EVALUATED:
+Title: ${video.title}
+Description: ${(video.videoInfo || '').substring(0, 400)}
+Shot list: ${(video.shotList || '').substring(0, 300)}
+
+SCORING GUIDE FOR B-ROLL FOOTAGE:
+- 85-100: PERFECT MATCH - Shows exactly what the news topic is about (same event, same location, same context)
+- 70-84: STRONG MATCH - Shows very related content (same type of event, same country, similar context)
+- 55-69: MODERATE MATCH - Shows somewhat related content (same general topic or region)
+- 40-54: WEAK MATCH - Only loosely connected (same broad category)
+- 0-39: NO MATCH - Different topic, wrong country, or unrelated content
+
+IMPORTANT CONTEXT RULES:
+- Military footage (strikes, convoys, weapons) → must match the SPECIFIC conflict/country
+- Disaster footage (earthquake, flood) → must match the SPECIFIC event/location
+- Political footage (summit, speech) → must match the SPECIFIC event/participants
+- Protest footage → must match the SPECIFIC cause/location
+- Economic news → can be more flexible with stock footage of markets, trade, etc.
+
+Answer with JSON only:
+{
+  "shows_relevant_content": true/false,
+  "detected_elements": ["element1", "element2", "element3"],
+  "context_match": "exact/related/loose/none",
+  "country_match": true/false,
+  "relevance_score": 0-100,
+  "recommendation": "ACCEPT/REVIEW/REJECT",
+  "reason": "Brief explanation of why this footage matches or doesn't match"
+}`;
+                    }
+
+                    const visionResult = await visionModel.generateContent([
+                        { inlineData: { mimeType: 'image/png', data: video.screenshot.toString('base64') } },
+                        visionPrompt
+                    ]);
+
+                    const visionText = visionResult.response.text().replace(/```json\n?|```/g, '').trim();
+                    
+                    // Parse JSON with error handling
+                    let visual;
+                    try {
+                        visual = JSON.parse(visionText);
+                    } catch (parseError) {
+                        console.error(`      JSON parse error: ${parseError.message}`);
+                        console.error(`      Raw response: ${visionText.substring(0, 200)}...`);
+                        // Create default response
+                        visual = {
+                            shows_relevant_content: false,
+                            relevance_score: 30,
+                            recommendation: 'REVIEW',
+                            reason: 'Could not parse vision response'
+                        };
+                    }
+                    
+                    // Process results based on mode
+                    if (requiresPersonMatch) {
+                        // Person matching mode
+                        const isPersonMatch = visual.shows_person === true && 
+                            (visual.person_identified?.toLowerCase().includes(personToMatch.toLowerCase().split(' ')[0]) || 
+                             visual.confidence >= 0.8);
+                        
+                        if (isPersonMatch) {
+                            visual.relevance_score = Math.max(visual.relevance_score, 90);
+                            visual.recommendation = 'ACCEPT';
+                            visual.person_match = true;
+                            console.log(`      [PERSONA ENCONTRADA] ${visual.person_identified} (${(visual.confidence * 100).toFixed(0)}%)`);
+                        } else if (visual.shows_person && visual.confidence >= 0.5) {
+                            visual.recommendation = 'REVIEW';
+                            visual.person_match = 'possible';
+                            console.log(`      [POSIBLE] ${visual.person_identified} (${(visual.confidence * 100).toFixed(0)}%)`);
+                        } else {
+                            visual.relevance_score = Math.min(visual.relevance_score, 40);
+                            visual.recommendation = 'REJECT';
+                            visual.person_match = false;
+                            console.log(`      [NO ES ${personToMatch}] Detectado: ${visual.person_identified}`);
+                        }
+                        
+                        visual.person_detected = visual.person_identified;
+                    } else {
+                        // FOOTAGE MODE - Consider context_match and country_match
+                        const contextMatch = visual.context_match || 'none';
+                        const countryMatch = visual.country_match !== false;
+                        
+                        // Adjust score based on context
+                        if (contextMatch === 'exact' && countryMatch) {
+                            visual.relevance_score = Math.max(visual.relevance_score, 85);
+                            console.log(`      [CONTEXTO EXACTO] País correcto`);
+                        } else if (contextMatch === 'related' && countryMatch) {
+                            visual.relevance_score = Math.max(visual.relevance_score, 70);
+                            console.log(`      [CONTEXTO RELACIONADO] País correcto`);
+                        } else if (!countryMatch && visual.relevance_score > 60) {
+                            visual.relevance_score = Math.min(visual.relevance_score, 55);
+                            console.log(`      [PAIS INCORRECTO] Score reducido`);
+                        }
+                        
+                        // Set recommendation based on adjusted score
+                        if (visual.relevance_score >= 75) {
+                            visual.recommendation = 'ACCEPT';
+                        } else if (visual.relevance_score >= 55) {
+                            visual.recommendation = 'REVIEW';
+                        } else {
+                            visual.recommendation = 'REJECT';
+                        }
+                        
+                        console.log(`      Context: ${contextMatch}, Country: ${countryMatch}`);
+                    }
+                    
+                    video.visualAnalysis = { 
+                        success: true, 
+                        ...visual,
+                        matchMode: requiresPersonMatch ? 'person' : 'footage'
+                    };
+                    analyzedCount++;
+
+                    console.log(`      Score: ${visual.relevance_score}`);
+                    console.log(`      Recommendation: ${visual.recommendation}`);
+
+                    // Send to UI
+                    const matchInfo = requiresPersonMatch 
+                        ? `${visual.person_match === true ? 'SI' : visual.person_match === 'possible' ? 'POSIBLE' : 'NO'} - ${visual.person_detected || 'N/A'}`
+                        : `${visual.relevance_score}%`;
+                    
+                    onProgress({ 
+                        stage: 5, 
+                        message: `[${vi + 1}/${topVideos.length}] ${visual.recommendation}: ${requiresPersonMatch ? `Persona: ${matchInfo}` : `Relevancia: ${matchInfo}`}`,
+                        videoTitle: shortTitle,
+                        visualScore: visual.relevance_score,
+                        recommendation: visual.recommendation,
+                        personMatch: visual.person_match,
+                        personDetected: visual.person_detected,
+                        matchMode: requiresPersonMatch ? 'person' : 'footage'
+                    });
+
+                    await new Promise(r => setTimeout(r, 1500)); // Rate limit
+
+                } catch (error) {
+                    console.error(`      Vision error: ${error.message}`);
+                    video.visualAnalysis = { success: false };
+                    onProgress({ 
+                        stage: 5, 
+                        message: `[${vi + 1}/${topVideos.length}] Error: ${error.message?.substring(0, 30)}`,
+                        error: true
+                    });
+                }
+            }
+
+            results.timings.stage5 = Date.now() - startStage5;
+            console.log(`   Analyzed ${analyzedCount}/${topVideos.length} images in ${results.timings.stage5}ms`);
+            onProgress({ 
+                stage: 5, 
+                message: `Visual analysis complete: ${analyzedCount}/${topVideos.length} images analyzed`,
+                complete: true
+            });
+
+            // ================================================================
+            // STAGE 6: FINAL RANKING
+            // Now considers person/footage matching in scoring
+            // ================================================================
+            console.log('\n[STAGE 6] Final Ranking...');
+            const rankingMode = requiresPersonMatch ? 'PERSON PRIORITY' : 'FOOTAGE PRIORITY';
+            onProgress({ stage: 6, message: `Combining scores (${rankingMode}) - 60% text, 40% visual...` });
+            const startStage6 = Date.now();
+
+            const finalRanking = topVideos.map(v => {
+                const textScore = v.textScore.score;
+                const visualScore = v.visualAnalysis?.relevance_score || 0;
+                const hasVisual = v.visualAnalysis?.success;
+                
+                // Base hybrid score: 60% text, 40% visual
+                let finalScore = hasVisual 
+                    ? Math.round(textScore * 0.6 + visualScore * 0.4)
+                    : textScore;
+                
+                // Apply bonuses/penalties based on match mode
+                let matchBonus = 0;
+                let matchPenalty = 0;
+                
+                if (requiresPersonMatch && v.visualAnalysis) {
+                    // Person matching mode: heavy bonus for person match, heavy penalty for mismatch
+                    if (v.visualAnalysis.person_match === true) {
+                        matchBonus = 25; // Big bonus for confirmed person match
+                        console.log(`   [BONUS +25] Person match confirmed: ${v.visualAnalysis.person_detected}`);
+                    } else if (v.visualAnalysis.person_match === 'possible' && v.visualAnalysis.person_confidence >= 0.6) {
+                        matchBonus = 10; // Moderate bonus for possible match
+                        console.log(`   [BONUS +10] Possible person match (${(v.visualAnalysis.person_confidence * 100).toFixed(0)}%)`);
+                    } else if (v.visualAnalysis.person_match === false) {
+                        matchPenalty = 30; // Heavy penalty for wrong person
+                        console.log(`   [PENALTY -30] Person mismatch`);
+                    }
+                }
+                
+                // TEXT-BASED PERSON MATCH - person name found in video metadata
+                if (v.textScore?.personMatchInText) {
+                    matchBonus += 20; // Bonus for person name in text
+                    console.log(`   [BONUS +20] Person name found in video text/shotlist`);
+                } else if (v.visualAnalysis) {
+                    // Footage matching mode: bonus for high relevance
+                    const footageScore = v.visualAnalysis.relevance_score || visualScore;
+                    if (footageScore >= 80) {
+                        matchBonus = 15; // Bonus for strong footage match
+                        console.log(`   [BONUS +15] Strong footage match (${footageScore}%)`);
+                    } else if (footageScore < 60) {
+                        matchPenalty = 20; // Penalty for weak footage match
+                        console.log(`   [PENALTY -20] Weak footage match (${footageScore}%)`);
+                    }
+                }
+                
+                finalScore = Math.max(0, Math.min(100, finalScore + matchBonus - matchPenalty));
+                
+                return { 
+                    ...v, 
+                    finalScore, 
+                    textScoreNum: textScore, 
+                    visualScore: hasVisual ? visualScore : null,
+                    matchBonus,
+                    matchPenalty,
+                    personMatch: v.visualAnalysis?.person_match,
+                    personDetected: v.visualAnalysis?.person_detected,
+                    sceneMatchPercentage: v.visualAnalysis?.scene_match_percentage
+                };
+            });
+
+            // Sort by final score, but PRIORITIZE person matches if in person mode
+            finalRanking.sort((a, b) => {
+                if (requiresPersonMatch) {
+                    // In person mode: true matches first, then possible, then others
+                    const aMatch = a.personMatch === true ? 2 : (a.personMatch === 'possible' ? 1 : 0);
+                    const bMatch = b.personMatch === true ? 2 : (b.personMatch === 'possible' ? 1 : 0);
+                    if (aMatch !== bMatch) return bMatch - aMatch;
+                }
+                return b.finalScore - a.finalScore;
+            });
+
+            results.videos = finalRanking;
+
+            // Send winner info to UI with person/footage match details
+            const topCandidate = finalRanking[0];
+            if (topCandidate) {
+                const matchDetail = requiresPersonMatch 
+                    ? `Person: ${topCandidate.personMatch ? 'YES' : 'NO'} (${topCandidate.personDetected || 'N/A'})`
+                    : `Footage: ${topCandidate.sceneMatchPercentage || topCandidate.visualScore}%`;
+                
+                onProgress({ 
+                    stage: 6, 
+                    message: `Winner: Score ${topCandidate.finalScore} | ${matchDetail} | "${(topCandidate.title || '').substring(0, 35)}..."`,
+                    winner: {
+                        title: topCandidate.title?.substring(0, 50),
+                        finalScore: topCandidate.finalScore,
+                        textScore: topCandidate.textScoreNum,
+                        visualScore: topCandidate.visualScore,
+                        personMatch: topCandidate.personMatch,
+                        personDetected: topCandidate.personDetected,
+                        sceneMatchPercentage: topCandidate.sceneMatchPercentage,
+                        matchMode: requiresPersonMatch ? 'person' : 'footage'
+                    }
+                });
+            }
+            results.winner = topCandidate || null;
+            results.matchMode = requiresPersonMatch ? 'person' : 'footage';
+
+            results.timings.stage6 = Date.now() - startStage6;
+            results.timings.total = Date.now() - startTotal;
+
+            // Log results with person/footage match info
+            console.log('\n' + '='.repeat(70));
+            console.log(`FINAL RESULTS (${requiresPersonMatch ? 'PERSON MODE' : 'FOOTAGE MODE'}):`);
+            console.log('='.repeat(70));
+            const medals = ['1st', '2nd', '3rd'];
+            finalRanking.forEach((v, i) => {
+                const matchInfo = requiresPersonMatch 
+                    ? `Person: ${v.personMatch || 'N/A'} (${v.personDetected || 'unknown'})`
+                    : `Footage: ${v.visualScore || 0}%`;
+                
+                console.log(`${medals[i] || '#'+(i+1)}: ${v.title}`);
+                console.log(`   URL: ${v.url}`);
+                console.log(`   Final Score: ${v.finalScore} (Text: ${v.textScoreNum}, Visual: ${v.visualScore ?? 'N/A'})`);
+                console.log(`   Match: ${matchInfo}`);
+                console.log(`   Bonuses: +${v.matchBonus || 0} / Penalties: -${v.matchPenalty || 0}`);
+                console.log(`   Verdict: ${v.visualAnalysis?.recommendation || 'N/A'}`);
+                if (v.shotList) {
+                    console.log(`   Shot List: "${v.shotList.substring(0, 100)}..."`);
+                }
+                console.log('');
+            });
+
+            console.log(`Total time: ${results.timings.total}ms (${(results.timings.total/1000).toFixed(1)}s)`);
+
+            // Recommendation with match info
+            if (topCandidate && topCandidate.finalScore >= 50) {
+                const matchStatus = requiresPersonMatch 
+                    ? (topCandidate.personMatch ? 'PERSON MATCHED' : 'PERSON NOT CONFIRMED')
+                    : `FOOTAGE ${topCandidate.sceneMatchPercentage || topCandidate.visualScore}% MATCH`;
+                console.log(`\nRECOMMENDED [${matchStatus}]: "${topCandidate.title.substring(0, 50)}..."`);
+            } else if (topCandidate) {
+                console.log(`\nLOW CONFIDENCE: Best score ${topCandidate.finalScore} - may need manual review`);
+            }
+
+            return results;
+
+        } catch (error) {
+            console.error('Intelligent search failed:', error);
+            results.error = error.message;
+            return results;
+        }
+    }
+
+    /**
+     * INTELLIGENT SEARCH AND DOWNLOAD
+     * Performs intelligent search, then attempts to download the best video.
+     * 
+     * STRATEGY:
+     * 1. Try to download best video directly
+     * 2. If requires My Content → wait up to 4 minutes
+     * 3. If timeout → try next candidates (skip My Content)
+     * 4. Return first successful download
+     * 
+     * @param {string} headline - News segment headline
+     * @param {string} text - News segment text/description
+     * @param {string} geminiApiKey - Gemini API key
+     * @param {Object} options - Options
+     * @param {Function} options.onProgress - Progress callback
+     * @param {Buffer} options.segmentFrame - Optional screenshot from the segment for visual matching
+     * @param {number} options.myContentWaitMinutes - Minutes to wait for My Content (default: 4)
+     * @param {number} options.maxCandidatesToTry - Max candidates to try (default: 5)
+     * @returns {Object} Download result with video info
+     */
+    async intelligentSearchAndDownload(headline, text, geminiApiKey, options = {}) {
+        const {
+            onProgress = () => {},
+            segmentFrame = null,
+            myContentWaitMinutes = 4,
+            maxCandidatesToTry = 5
+        } = options;
+
+        console.log('\n' + '='.repeat(70));
+        console.log('INTELLIGENT SEARCH AND DOWNLOAD');
+        console.log('='.repeat(70));
+        if (segmentFrame) {
+            console.log('[VioryDownloader] Segment frame provided for visual matching');
+        }
+
+        // Step 1: Run intelligent search to get ranked candidates
+        onProgress({ stage: 'search', message: 'Running intelligent search...' });
+        const searchResults = await this.intelligentSearch(headline, text, geminiApiKey, {
+            segmentFrame: segmentFrame,  // Pass the segment frame for visual analysis
+            onProgress: (p) => onProgress({ stage: 'search', ...p })
+        });
+
+        if (!searchResults.videos || searchResults.videos.length === 0) {
+            console.log('[VioryDownloader] No videos found in search');
+            return {
+                success: false,
+                error: 'No videos found matching the search criteria',
+                searchResults
+            };
+        }
+
+        console.log(`\n[VioryDownloader] Found ${searchResults.videos.length} candidates, attempting download...`);
+
+        const candidatesToTry = searchResults.videos.slice(0, maxCandidatesToTry);
+        const skippedVideos = [];
+        let firstVideoTriedMyContent = false;
+
+        // Step 2: Try FIRST (best) video - allow My Content wait
+        const bestVideo = candidatesToTry[0];
+        console.log(`\n[VioryDownloader] Trying BEST candidate: "${bestVideo.title?.substring(0, 50)}..."`);
+        console.log(`   URL: ${bestVideo.url}`);
+        console.log(`   Score: ${bestVideo.finalScore} (Text: ${bestVideo.textScoreNum}, Visual: ${bestVideo.visualScore ?? 'N/A'})`);
+
+        onProgress({
+            stage: 'download',
+            message: `Downloading best match...`,
+            video: { title: bestVideo.title, url: bestVideo.url, score: bestVideo.finalScore }
+        });
+
+        try {
+            // First attempt: try direct download (skipMyContent=true to detect if it needs My Content)
+            const firstResult = await this.downloadVideo(
+                bestVideo.url,
+                (p) => onProgress({ stage: 'download', ...p }),
+                { skipMyContent: true }
+            );
+
+            if (firstResult.success) {
+                console.log(`\n✅ SUCCESS: Downloaded "${bestVideo.title?.substring(0, 50)}..."`);
+                return this._buildSuccessResult(bestVideo, firstResult, 1, skippedVideos, searchResults);
+            }
+
+            // If needs My Content, wait for it (up to 4 minutes)
+            if (firstResult.needsMyContent) {
+                console.log(`\n[VioryDownloader] Best video requires My Content - waiting up to ${myContentWaitMinutes} minutes...`);
+                firstVideoTriedMyContent = true;
+                
+                onProgress({
+                    stage: 'myContent',
+                    message: `Video processing, waiting up to ${myContentWaitMinutes} min...`,
+                    video: { title: bestVideo.title }
+                });
+
+                const myContentResult = await this.downloadFromMyContent(
+                    (p) => onProgress({ stage: 'myContent', ...p }),
+                    firstResult.videoId,
+                    firstResult.videoTitle,
+                    { maxWaitMinutes: myContentWaitMinutes }
+                );
+
+                if (myContentResult.success) {
+                    console.log(`\n✅ SUCCESS (My Content): Downloaded "${bestVideo.title?.substring(0, 50)}..."`);
+                    return this._buildSuccessResult(bestVideo, myContentResult, 1, skippedVideos, searchResults);
+                }
+
+                // Timeout - add to skipped and try alternatives
+                if (myContentResult.timeout) {
+                    console.log(`\n⏱️ TIMEOUT: Video not ready after ${myContentWaitMinutes} minutes`);
+                    skippedVideos.push({
+                        url: bestVideo.url,
+                        title: bestVideo.title,
+                        score: bestVideo.finalScore,
+                        reason: `My Content timeout (${myContentWaitMinutes} min)`
+                    });
+                }
+            }
+        } catch (error) {
+            console.error(`   ❌ Error with best video: ${error.message}`);
+            skippedVideos.push({
+                url: bestVideo.url,
+                title: bestVideo.title,
+                score: bestVideo.finalScore,
+                reason: error.message
+            });
+        }
+
+        // Step 3: Try remaining candidates (SKIP My Content - only direct downloads)
+        console.log(`\n[VioryDownloader] Trying alternative candidates (direct download only)...`);
+
+        for (let i = 1; i < candidatesToTry.length; i++) {
+            const video = candidatesToTry[i];
+            
+            console.log(`\n[VioryDownloader] Trying candidate ${i + 1}/${candidatesToTry.length}: "${video.title?.substring(0, 50)}..."`);
+            console.log(`   URL: ${video.url}`);
+            console.log(`   Score: ${video.finalScore}`);
+
+            onProgress({
+                stage: 'download',
+                message: `Trying alternative ${i}/${candidatesToTry.length - 1}...`,
+                video: { title: video.title, url: video.url, score: video.finalScore }
+            });
+
+            try {
+                const downloadResult = await this.downloadVideo(
+                    video.url,
+                    (p) => onProgress({ stage: 'download', ...p }),
+                    { skipMyContent: true }  // Always skip My Content for alternatives
+                );
+
+                if (downloadResult.success) {
+                    console.log(`\n✅ SUCCESS (Alternative): Downloaded "${video.title?.substring(0, 50)}..."`);
+                    return this._buildSuccessResult(video, downloadResult, i + 1, skippedVideos, searchResults);
+                }
+
+                if (downloadResult.needsMyContent) {
+                    console.log(`   ⏭️ Skipped - requires My Content`);
+                    skippedVideos.push({
+                        url: video.url,
+                        title: video.title,
+                        score: video.finalScore,
+                        reason: 'Requires My Content (skipped)'
+                    });
+                    continue;
+                }
+
+                skippedVideos.push({
+                    url: video.url,
+                    title: video.title,
+                    score: video.finalScore,
+                    reason: downloadResult.message || 'Download failed'
+                });
+
+            } catch (error) {
+                console.error(`   ❌ Error: ${error.message}`);
+                skippedVideos.push({
+                    url: video.url,
+                    title: video.title,
+                    score: video.finalScore,
+                    reason: error.message
+                });
+            }
+        }
+
+        // All candidates failed
+        console.log('\n❌ ALL CANDIDATES FAILED');
+        console.log('Skipped videos:');
+        skippedVideos.forEach((v, i) => {
+            console.log(`   ${i + 1}. "${v.title?.substring(0, 40)}..." - ${v.reason}`);
+        });
+
+        return {
+            success: false,
+            error: 'All video candidates failed to download',
+            triedMyContent: firstVideoTriedMyContent,
+            skippedVideos,
+            searchResults
+        };
+    }
+
+    /**
+     * Helper to build success result object
+     * @private
+     */
+    _buildSuccessResult(video, downloadResult, candidateNumber, skippedVideos, searchResults) {
+        return {
+            success: true,
+            path: downloadResult.path,
+            filename: downloadResult.filename,
+            fromMyContent: downloadResult.fromMyContent || false,
+            video: {
+                url: video.url,
+                title: video.title,
+                finalScore: video.finalScore,
+                textScore: video.textScoreNum,
+                visualScore: video.visualScore,
+                shotList: video.shotList,
+                videoInfo: video.videoInfo,
+                mandatoryCredit: video.mandatoryCredit
+            },
+            candidateNumber,
+            skippedVideos,
+            searchResults
+        };
+    }
+
+    /**
      * Clear screenshot cache (call periodically to free memory)
      */
     clearScreenshotCache() {
@@ -954,12 +2325,30 @@ class VioryDownloader {
     }
 
     /**
-     * Download a video with checkbox handling, "preparing video" detection, and My Content fallback
+     * Extract Video ID from Viory URL (e.g., "a3126_25012026" from the URL)
      */
-    async downloadVideo(videoUrl, onProgress) {
+    extractVideoId(url) {
+        const match = url.match(/\/videos\/([a-zA-Z0-9_]+)\//);
+        return match ? match[1] : null;
+    }
+
+    /**
+     * Download a video with checkbox handling, "preparing video" detection, and My Content fallback
+     * @param {string} videoUrl - Video URL to download
+     * @param {Function} onProgress - Progress callback
+     * @param {Object} options - Download options
+     * @param {boolean} options.skipMyContent - If true, return immediately when video needs My Content (don't wait)
+     * @returns {Object} Result with success, path, or needsMyContent flag
+     */
+    async downloadVideo(videoUrl, onProgress, options = {}) {
+        const { skipMyContent = false } = options;
         console.log(`[VioryDownloader] Opening video: ${videoUrl}`);
 
-        // Store video title for matching in My Content
+        // Extract Video ID for exact matching in My Content
+        const videoId = this.extractVideoId(videoUrl);
+        console.log(`[VioryDownloader] Video ID: ${videoId}`);
+
+        // Store video title as fallback for matching in My Content
         let videoTitle = '';
 
         try {
@@ -1081,6 +2470,29 @@ class VioryDownloader {
 
             if (preparingModal.isPreparing) {
                 console.log('[VioryDownloader] Detected "Preparing video" modal - video needs watermarking');
+                
+                // If skipMyContent is true, return immediately without waiting
+                if (skipMyContent) {
+                    console.log('[VioryDownloader] skipMyContent=true, returning needsMyContent flag');
+                    // Dismiss the modal by clicking Continue or pressing Escape
+                    await this.page.evaluate(() => {
+                        const btns = Array.from(document.querySelectorAll('button'));
+                        const continueBtn = btns.find(b => (b.textContent || '').toLowerCase() === 'continue');
+                        if (continueBtn) continueBtn.click();
+                    });
+                    await this.page.keyboard.press('Escape').catch(() => {});
+                    await this.page.waitForTimeout(300);
+                    
+                    return {
+                        success: false,
+                        needsMyContent: true,
+                        videoUrl,
+                        videoId,
+                        videoTitle,
+                        message: 'Video requires My Content processing - skipped'
+                    };
+                }
+                
                 if (onProgress) onProgress({ status: 'preparing', message: 'Video is being prepared with watermark...' });
 
                 // Click "Go to My content" button if available
@@ -1099,8 +2511,8 @@ class VioryDownloader {
                     await this.page.waitForTimeout(1000);
                 }
 
-                // Go to My Content and wait for the video
-                return await this.downloadFromMyContent(onProgress, videoTitle);
+                // Go to My Content and wait for the video (use Video ID for exact match)
+                return await this.downloadFromMyContent(onProgress, videoId, videoTitle);
             }
 
             // Wait for download (with shorter timeout since we already checked for preparing modal)
@@ -1119,16 +2531,59 @@ class VioryDownloader {
                 console.log(`[VioryDownloader] Saved: ${savePath}`);
                 return { success: true, path: savePath, filename };
             } else {
-                // Download didn't start - try My Content fallback
-                console.log('[VioryDownloader] Direct download not started, checking My Content...');
-                return await this.downloadFromMyContent(onProgress, videoTitle);
+                // Download didn't start - check if video needs My Content
+                console.log('[VioryDownloader] Direct download not started');
+                
+                // Check if we're in a "preparing" state we missed earlier
+                const secondCheck = await this.checkForPreparingModal();
+                if (secondCheck.isPreparing && skipMyContent) {
+                    console.log('[VioryDownloader] Video needs My Content (detected late), skipping...');
+                    return {
+                        success: false,
+                        needsMyContent: true,
+                        videoUrl,
+                        videoId,
+                        videoTitle,
+                        message: 'Video requires My Content processing - skipped'
+                    };
+                }
+                
+                if (skipMyContent) {
+                    console.log('[VioryDownloader] skipMyContent=true, not waiting for My Content');
+                    return {
+                        success: false,
+                        needsMyContent: true,
+                        videoUrl,
+                        videoId,
+                        videoTitle,
+                        message: 'Direct download failed, My Content would be required - skipped'
+                    };
+                }
+                
+                // Try My Content fallback
+                console.log('[VioryDownloader] Checking My Content...');
+                return await this.downloadFromMyContent(onProgress, videoId, videoTitle);
             }
 
         } catch (error) {
             console.error('[VioryDownloader] Download failed:', error.message);
+            
+            // If skipMyContent, don't try My Content fallback
+            if (skipMyContent) {
+                console.log('[VioryDownloader] skipMyContent=true, not attempting My Content fallback');
+                return {
+                    success: false,
+                    needsMyContent: true,
+                    videoUrl,
+                    videoId,
+                    videoTitle,
+                    message: `Download failed: ${error.message} - My Content would be required`
+                };
+            }
+            
             // Fallback to My Content
             try {
-                return await this.downloadFromMyContent(onProgress, videoTitle);
+                return await this.downloadFromMyContent(onProgress, videoId, videoTitle);
             } catch (fallbackError) {
                 console.error('[VioryDownloader] My Content fallback also failed:', fallbackError.message);
                 throw error;
@@ -1307,294 +2762,280 @@ class VioryDownloader {
     }
 
     /**
-     * Download video from My Content page (fallback)
+     * Download video from My Content page (fallback when video needs preparation)
+     * Uses Video ID for EXACT matching to ensure we download the correct video
      * @param {Function} onProgress - Progress callback
-     * @param {string} targetVideoTitle - Optional title to match (for better identification)
+     * @param {string} targetVideoId - Video ID from URL (e.g., "a3126_25012026") - PRIMARY match
+     * @param {string} targetVideoTitle - Video title as fallback for matching
+     * @param {Object} options - Options
+     * @param {number} options.maxWaitMinutes - Maximum minutes to wait (default: 4)
+     * @returns {Object} Result with success flag, or timeout flag if video not ready
      */
-    async downloadFromMyContent(onProgress, targetVideoTitle = '') {
+    async downloadFromMyContent(onProgress, targetVideoId = '', targetVideoTitle = '', options = {}) {
+        const { maxWaitMinutes = 4 } = options;
+        
         console.log('[VioryDownloader] Navigating to My Content page...');
-        console.log(`[VioryDownloader] Looking for video: "${(targetVideoTitle || '').substring(0, 50)}..."`);
+        console.log(`[VioryDownloader] Target Video ID: ${targetVideoId || '(none)'}`);
+        console.log(`[VioryDownloader] Target Title: "${(targetVideoTitle || '').substring(0, 50)}..."`);
+        console.log(`[VioryDownloader] Max wait time: ${maxWaitMinutes} minutes`);
 
-        // OPTIMIZED: Changed from networkidle/30000 to domcontentloaded/25000
-        // ORIGINAL: await this.page.goto('https://www.viory.video/en/user', { waitUntil: 'networkidle', timeout: 30000 });
+        // Navigate to My Content page
         await this.page.goto('https://www.viory.video/en/user', {
             waitUntil: 'domcontentloaded',
             timeout: 25000
         });
-        // OPTIMIZED: Wait for button selector + reduced from 3000ms to 1500ms
-        // ORIGINAL: await this.page.waitForTimeout(3000);
         await this.page.waitForSelector('button', { timeout: 5000 }).catch(() => {});
-        await this.page.waitForTimeout(1500);
+        await this.page.waitForTimeout(2000);
 
-        // Extract keywords from target title for matching
-        const targetTitleLower = (targetVideoTitle || '').toLowerCase();
-        const targetKeywords = targetTitleLower
-            .replace(/[^\w\s]/g, ' ')
-            .split(/\s+/)
-            .filter(w => w.length > 3 && !['video', 'viory', 'download'].includes(w))
-            .slice(0, 5);
+        // Polling configuration - 4 minutes default (48 attempts * 5 seconds)
+        const pollInterval = 5000;
+        const maxAttempts = Math.ceil((maxWaitMinutes * 60 * 1000) / pollInterval);
 
-        console.log(`[VioryDownloader] Target keywords: [${targetKeywords.join(', ')}]`);
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            console.log(`[VioryDownloader] Poll ${attempt}/${maxAttempts} - Checking My Content...`);
 
-        // Helper function to check if a title matches our target
-        const titleMatchesTarget = (title) => {
-            if (!targetVideoTitle || targetKeywords.length === 0) return true; // No target = accept any
-            const titleLower = (title || '').toLowerCase();
-            const matchCount = targetKeywords.filter(kw => titleLower.includes(kw)).length;
-            const minRequired = Math.min(2, targetKeywords.length);
-            return matchCount >= minRequired;
-        };
+            // NEW APPROACH: Find the video by looking for the ID pattern and then find the nearest download button
+            const videoStatus = await this.page.evaluate((videoId) => {
+                const pageText = document.body.innerText;
 
-        let attempts = 0;
-        // OPTIMIZED: Increased from 36 to 45 to compensate for faster polling
-        // ORIGINAL: const maxAttempts = 36; // 3 minutes max (5 sec intervals)
-        const maxAttempts = 45; // ~3 minutes with adaptive polling (2.5s then 4s intervals)
-
-        while (attempts < maxAttempts) {
-            // Scan ALL video cards in My Content page (including those still preparing)
-            const contentInfo = await this.page.evaluate(() => {
-                const videos = [];
-
-                // Find all video cards by looking for "Video • ID" text pattern
-                // This catches ALL videos, not just those with download buttons ready
-                const allElements = document.querySelectorAll('*');
-                const videoCards = [];
-
-                allElements.forEach(el => {
-                    const text = el.innerText || '';
-                    // Look for video ID pattern and make sure it's a container (not too deep)
-                    if (text.includes('Video') && text.includes('ID a') && el.children.length > 0) {
-                        // Check if this element has either a download button OR preparing text
-                        const hasDownloadBtn = text.toLowerCase().includes('download') && text.toLowerCase().includes('1080p');
-                        const isPreparing = text.toLowerCase().includes('preparing') || text.toLowerCase().includes('cancel request');
-
-                        if (hasDownloadBtn || isPreparing) {
-                            // Make sure we don't add parent elements of already added cards
-                            const isParentOfExisting = videoCards.some(card => el.contains(card));
-                            const isChildOfExisting = videoCards.some(card => card.contains(el));
-
-                            if (!isParentOfExisting && !isChildOfExisting) {
-                                videoCards.push(el);
-                            } else if (isParentOfExisting) {
-                                // Replace with smaller (more specific) element
-                                const idx = videoCards.findIndex(card => el.contains(card));
-                                // Keep the smaller one
-                            }
-                        }
-                    }
-                });
-
-                // Process each video card
-                videoCards.forEach((card, index) => {
-                    const cardText = card.innerText || '';
-                    const lines = cardText.split('\n').map(l => l.trim()).filter(l => l);
-
-                    let title = '';
-                    let videoId = '';
-                    let isReady = false;
-                    let isPreparing = false;
-
-                    for (const line of lines) {
-                        // Extract video ID
-                        if (line.includes('ID a') || line.match(/ID\s+a\d+/)) {
-                            videoId = line;
-                        }
-                        // Check status
-                        if (line.toLowerCase().includes('download') && line.toLowerCase().includes('1080p')) {
-                            isReady = true;
-                        }
-                        if (line.toLowerCase().includes('preparing') || line.toLowerCase().includes('cancel request')) {
-                            isPreparing = true;
-                        }
-                        // Extract title (not metadata lines)
-                        if (!title &&
-                            line.length > 15 &&
-                            !line.startsWith('Video') &&
-                            !line.toLowerCase().includes('download') &&
-                            !line.toLowerCase().includes('1080p') &&
-                            !line.toLowerCase().includes('preparing') &&
-                            !line.toLowerCase().includes('cancel') &&
-                            !line.includes('ID a')) {
-                            title = line;
-                        }
-                    }
-
-                    if (title || videoId) {
-                        videos.push({
-                            index,
-                            title: title.substring(0, 250),
-                            videoId,
-                            isReady,        // Has "Download 1080p, mp4, Branded" button
-                            isPreparing,    // Shows "Preparing to download..."
-                            cardIndex: index
-                        });
-                    }
-                });
-
-                // Sort by position (first = most recent)
-                // Note: videoCards are already in DOM order
-
-                return {
-                    videos,
-                    totalVideos: videos.length,
-                    hasAnyPreparing: videos.some(v => v.isPreparing),
-                    hasAnyReady: videos.some(v => v.isReady)
-                };
-            });
-
-            console.log(`[VioryDownloader] Found ${contentInfo.totalVideos} videos in My Content`);
-            console.log(`[VioryDownloader] Status: ${contentInfo.hasAnyReady ? 'Some ready' : 'None ready'}, ${contentInfo.hasAnyPreparing ? 'Some preparing' : 'None preparing'}`);
-
-            // Log all videos found with their status
-            contentInfo.videos.forEach((v, i) => {
-                const status = v.isReady ? '✓ READY' : (v.isPreparing ? '⏳ PREPARING' : '? UNKNOWN');
-                console.log(`[VioryDownloader]   ${i + 1}. [${status}] "${(v.title || 'No title').substring(0, 50)}..."`);
-            });
-
-            if (contentInfo.totalVideos > 0) {
-                // Find the video that matches our target
-                let matchingVideo = null;
-
-                for (let i = 0; i < contentInfo.videos.length; i++) {
-                    const video = contentInfo.videos[i];
-                    if (titleMatchesTarget(video.title)) {
-                        matchingVideo = video;
-                        console.log(`[VioryDownloader] ✓ Match found at position ${i + 1}: "${video.title.substring(0, 50)}..."`);
-                        break;
-                    }
+                // Check if our Video ID exists anywhere on the page
+                if (!pageText.includes(videoId)) {
+                    return { found: false, reason: 'Video ID not found on page', debug: { pageLength: pageText.length } };
                 }
 
-                if (matchingVideo) {
-                    // Check if matching video is READY or still PREPARING
-                    if (matchingVideo.isPreparing && !matchingVideo.isReady) {
-                        // Video is still preparing - WAIT for it, don't download anything else!
-                        console.log(`[VioryDownloader] ⏳ Matching video is still preparing. Waiting...`);
-                        console.log(`[VioryDownloader] Target: "${matchingVideo.title.substring(0, 50)}..."`);
+                // Find ALL buttons on the page that contain "Download"
+                const allButtons = Array.from(document.querySelectorAll('button'));
+                const downloadButtons = allButtons.filter(btn => {
+                    const text = (btn.textContent || '').toLowerCase();
+                    return text.includes('download') && (text.includes('1080p') || text.includes('720p') || text.includes('mp4'));
+                });
 
-                        if (onProgress) {
-                            onProgress({
-                                status: 'processing',
-                                message: `Video preparing... (${attempts + 1}/${maxAttempts})`,
-                                attempt: attempts + 1,
-                                maxAttempts
-                            });
+                // Find ALL elements that contain our video ID
+                const idElements = Array.from(document.querySelectorAll('*')).filter(el => {
+                    const text = el.innerText || el.textContent || '';
+                    return text.includes(`ID ${videoId}`) || text.includes(`ID\n${videoId}`);
+                });
+
+                // For each ID element, find the closest download button (look at siblings and parent's children)
+                let targetButton = null;
+                let videoTitle = '';
+                let isPreparing = false;
+
+                for (const idEl of idElements) {
+                    // Walk up to find a container that has both the ID and a button
+                    let container = idEl.parentElement;
+                    for (let i = 0; i < 5 && container; i++) {
+                        const containerText = container.innerText || '';
+                        
+                        // Skip if this container is too large (the whole page)
+                        if (containerText.length > 5000) {
+                            container = container.parentElement;
+                            continue;
                         }
 
-                        // OPTIMIZED: Adaptive polling - faster at start, slower later
-                        // ORIGINAL: await this.page.waitForTimeout(5000); (fixed 5s)
-                        // First 6 attempts (~15-18s): poll every 2.5s, then every 4s
-                        const pollDelay = attempts < 6 ? 2500 : 4000;
-                        await this.page.waitForTimeout(pollDelay);
-                        // OPTIMIZED: Changed from networkidle to domcontentloaded
-                        // ORIGINAL: await this.page.reload({ waitUntil: 'networkidle' }).catch(() => {});
-                        await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-                        await this.page.waitForTimeout(800);
-                        attempts++;
-                        continue; // Go back to start of while loop
-                    }
+                        // Check if this container has the video ID
+                        if (!containerText.includes(videoId)) {
+                            container = container.parentElement;
+                            continue;
+                        }
 
-                    if (matchingVideo.isReady) {
-                        // Video is ready - download it!
-                        console.log(`[VioryDownloader] ✓ Matching video is READY. Downloading...`);
-
-                        const downloadPromise = this.page.waitForEvent('download', { timeout: 60000 }).catch(() => null);
-
-                        // Find and click the download button for THIS specific video by title
-                        const clicked = await this.page.evaluate((targetTitle) => {
-                            // Find all video cards with download buttons
-                            const buttons = Array.from(document.querySelectorAll('button')).filter(btn => {
-                                const text = (btn.textContent || '').toLowerCase();
-                                return text.includes('download') && text.includes('1080p');
-                            });
-
-                            // Find the button whose parent container has the matching title
-                            for (const btn of buttons) {
-                                let container = btn.parentElement;
-                                for (let i = 0; i < 6 && container; i++) {
-                                    if (container.innerText && container.innerText.includes(targetTitle.substring(0, 50))) {
-                                        btn.click();
-                                        return { clicked: true, buttonText: btn.textContent.trim() };
-                                    }
-                                    container = container.parentElement;
+                        // Check for "Preparing" or "Cancel request" text (video still processing)
+                        const containerLower = containerText.toLowerCase();
+                        if (containerLower.includes('preparing to download') || containerLower.includes('cancel request')) {
+                            isPreparing = true;
+                            // Try to extract title
+                            const lines = containerText.split('\n').map(l => l.trim()).filter(l => l.length > 15);
+                            for (const line of lines) {
+                                if (!line.includes('Download') && !line.includes('Preparing') && 
+                                    !line.includes('Cancel') && !line.includes('Video') && !line.includes('ID ')) {
+                                    videoTitle = line.substring(0, 100);
+                                    break;
                                 }
                             }
+                            return { found: true, videoId, title: videoTitle, isPreparing: true, isReady: false };
+                        }
 
-                            // Fallback: click first download button (should match if our logic is correct)
-                            if (buttons.length > 0) {
-                                buttons[0].click();
-                                return { clicked: true, buttonText: buttons[0].textContent.trim(), fallback: true };
+                        // Look for a download button within this container
+                        const btnsInContainer = container.querySelectorAll('button');
+                        for (const btn of btnsInContainer) {
+                            const btnText = (btn.textContent || '').toLowerCase();
+                            if (btnText.includes('download') && (btnText.includes('1080p') || btnText.includes('720p') || btnText.includes('mp4'))) {
+                                targetButton = btn;
+                                
+                                // Extract title from the container
+                                const lines = containerText.split('\n').map(l => l.trim()).filter(l => l.length > 15);
+                                for (const line of lines) {
+                                    if (!line.includes('Download') && !line.includes('Preparing') && 
+                                        !line.includes('Cancel') && !line.includes('Video') && !line.includes('ID ')) {
+                                        videoTitle = line.substring(0, 100);
+                                        break;
+                                    }
+                                }
+                                break;
                             }
+                        }
 
-                            return { clicked: false };
-                        }, matchingVideo.title);
+                        if (targetButton) break;
+                        container = container.parentElement;
+                    }
 
-                        if (clicked.clicked) {
-                            console.log(`[VioryDownloader] Clicked: "${clicked.buttonText}"${clicked.fallback ? ' (fallback)' : ''}`);
-                            if (onProgress) onProgress({ status: 'downloading', message: 'Downloading from My Content...' });
+                    if (targetButton) break;
+                }
 
-                            const download = await downloadPromise;
-                            if (download) {
-                                const filename = download.suggestedFilename();
-                                const savePath = path.join(this.downloadsPath, filename);
+                if (isPreparing) {
+                    return { found: true, videoId, title: videoTitle, isPreparing: true, isReady: false };
+                }
 
-                                if (onProgress) onProgress({ status: 'saving', filename });
-                                await download.saveAs(savePath);
-                                await this.saveCookies();
+                if (!targetButton) {
+                    // Check if video exists but in "Access history" section (already downloaded before)
+                    const hasAccessHistory = pageText.includes('Access history');
+                    return { 
+                        found: false, 
+                        reason: 'Could not find download button for this video ID', 
+                        debug: { 
+                            downloadButtonsFound: downloadButtons.length,
+                            idElementsFound: idElements.length,
+                            hasAccessHistory
+                        }
+                    };
+                }
 
-                                console.log(`[VioryDownloader] ✓ Downloaded: ${savePath}`);
-                                return {
-                                    success: true,
-                                    path: savePath,
-                                    filename,
-                                    fromMyContent: true,
-                                    videoTitle: matchingVideo.title
-                                };
+                return {
+                    found: true,
+                    videoId: videoId,
+                    title: videoTitle,
+                    isPreparing: false,
+                    isReady: true,
+                    buttonText: targetButton.textContent?.trim() || 'Download'
+                };
+            }, targetVideoId);
+
+            // Log status with debug info
+            if (!videoStatus.found) {
+                console.log(`[VioryDownloader] ${videoStatus.reason}`);
+                if (videoStatus.debug) {
+                    console.log(`[VioryDownloader] Debug: ${JSON.stringify(videoStatus.debug)}`);
+                }
+            } else {
+                const status = videoStatus.isReady ? 'READY' : (videoStatus.isPreparing ? 'PREPARING' : 'UNKNOWN');
+                console.log(`[VioryDownloader] Video "${(videoStatus.title || '').substring(0, 40)}..." - Status: ${status}`);
+                if (videoStatus.buttonText) {
+                    console.log(`[VioryDownloader] Found button: "${videoStatus.buttonText}"`);
+                }
+            }
+
+            // If video is READY, download it
+            if (videoStatus.found && videoStatus.isReady) {
+                console.log(`[VioryDownloader] Video is ready! Starting download...`);
+                if (onProgress) onProgress({ status: 'downloading', message: 'Downloading from My Content...' });
+
+                // Set up download listener BEFORE clicking
+                const downloadPromise = this.page.waitForEvent('download', { timeout: 60000 }).catch(() => null);
+
+                // Click the download button using a more robust method
+                const clicked = await this.page.evaluate((videoId) => {
+                    // Find the element with our video ID
+                    const allElements = Array.from(document.querySelectorAll('*'));
+                    
+                    for (const el of allElements) {
+                        const text = el.innerText || el.textContent || '';
+                        if (!text.includes(`ID ${videoId}`) && !text.includes(`ID\n${videoId}`)) continue;
+                        if (text.length > 5000) continue; // Skip the whole page
+                        
+                        // Look for download button
+                        const btns = el.querySelectorAll('button');
+                        for (const btn of btns) {
+                            const btnText = (btn.textContent || '').toLowerCase();
+                            if (btnText.includes('download') && (btnText.includes('1080p') || btnText.includes('720p') || btnText.includes('mp4'))) {
+                                console.log('[MyContent] Clicking button:', btn.textContent?.trim());
+                                btn.click();
+                                return { success: true, buttonText: btn.textContent?.trim() || 'Download' };
                             }
                         }
                     }
-                } else {
-                    // No matching video found in the list
-                    console.log(`[VioryDownloader] ✗ No matching video found. Keywords: [${targetKeywords.join(', ')}]`);
 
-                    // Check if we should keep waiting (video might still be processing)
-                    if (contentInfo.hasAnyPreparing) {
-                        console.log(`[VioryDownloader] Some videos still preparing, waiting...`);
-                    } else if (attempts < 6) {
-                        // Wait a bit for the new video to appear (first 30 seconds)
-                        console.log(`[VioryDownloader] Waiting for new video to appear... (attempt ${attempts + 1})`);
-                    } else {
-                        // After 30 seconds, if no match found, fail fast
-                        console.error(`[VioryDownloader] ✗ Target video not found in My Content after ${attempts * 5}s`);
-                        throw new Error(`Target video not found in My Content. Expected keywords: [${targetKeywords.join(', ')}]. Available videos don't match.`);
+                    // Fallback: Try to find any download button near a video ID mention
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    for (const btn of buttons) {
+                        const btnText = (btn.textContent || '').toLowerCase();
+                        if (btnText.includes('download') && btnText.includes('1080p')) {
+                            // Check if this button's parent contains our video ID
+                            let parent = btn.parentElement;
+                            for (let i = 0; i < 10 && parent; i++) {
+                                if ((parent.innerText || '').includes(videoId)) {
+                                    console.log('[MyContent] Clicking button (fallback):', btn.textContent?.trim());
+                                    btn.click();
+                                    return { success: true, buttonText: btn.textContent?.trim() || 'Download', fallback: true };
+                                }
+                                parent = parent.parentElement;
+                            }
+                        }
                     }
+
+                    return { success: false };
+                }, targetVideoId);
+
+                if (clicked.success) {
+                    console.log(`[VioryDownloader] Clicked: "${clicked.buttonText}"${clicked.fallback ? ' (fallback method)' : ''}`);
+
+                    const download = await downloadPromise;
+                    if (download) {
+                        const filename = download.suggestedFilename();
+                        const savePath = path.join(this.downloadsPath, filename);
+
+                        if (onProgress) onProgress({ status: 'saving', filename });
+                        await download.saveAs(savePath);
+                        await this.saveCookies();
+
+                        console.log(`[VioryDownloader] Downloaded: ${savePath}`);
+                        return {
+                            success: true,
+                            path: savePath,
+                            filename,
+                            fromMyContent: true,
+                            videoId: targetVideoId,
+                            videoTitle: videoStatus.title
+                        };
+                    } else {
+                        console.error('[VioryDownloader] Download event not received after click');
+                        // Try one more time with a longer wait
+                        await this.page.waitForTimeout(2000);
+                    }
+                } else {
+                    console.error('[VioryDownloader] Could not find/click download button');
                 }
-            } else if (contentInfo.hasAnyPreparing) {
-                console.log(`[VioryDownloader] No videos ready yet, still processing... (attempt ${attempts + 1}/${maxAttempts})`);
+            }
+
+            // Video still preparing or not found - wait and refresh
+            if (videoStatus.found && videoStatus.isPreparing) {
                 if (onProgress) {
                     onProgress({
                         status: 'processing',
-                        message: `Video being prepared... (${attempts + 1}/${maxAttempts})`,
-                        attempt: attempts + 1,
+                        message: `Video preparing... (${attempt}/${maxAttempts})`,
+                        attempt,
                         maxAttempts
                     });
                 }
-            } else {
-                console.log(`[VioryDownloader] No videos found and not processing (attempt ${attempts + 1})`);
             }
 
-            // OPTIMIZED: Adaptive polling - faster at start, slower later
-            // ORIGINAL: await this.page.waitForTimeout(5000); (fixed 5s interval)
-            const pollDelay = attempts < 6 ? 2500 : 4000;
-            await this.page.waitForTimeout(pollDelay);
-            // OPTIMIZED: Changed from networkidle to domcontentloaded
-            // ORIGINAL: await this.page.reload({ waitUntil: 'networkidle' }).catch(() => {});
-            await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-            await this.page.waitForTimeout(800);
-            attempts++;
+            // Wait and refresh page
+            if (attempt < maxAttempts) {
+                console.log(`[VioryDownloader] Waiting ${pollInterval / 1000}s before refresh...`);
+                await this.page.waitForTimeout(pollInterval);
+                await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                await this.page.waitForTimeout(1500);
+            }
         }
 
-        console.error('[VioryDownloader] ✗ Timed out waiting for matching video');
-        throw new Error('Timed out waiting for matching video in My Content. The video may still be processing.');
+        console.log(`[VioryDownloader] Timeout after ${maxWaitMinutes} minutes - video not ready`);
+        return {
+            success: false,
+            timeout: true,
+            waitedMinutes: maxWaitMinutes,
+            videoId: targetVideoId,
+            videoTitle: targetVideoTitle,
+            message: `Video not ready after ${maxWaitMinutes} minutes`
+        };
     }
 
     /**

@@ -9,40 +9,229 @@ import lowerThirdRenderer from './lowerThirdRenderer.js';
 import mandatoryCreditRenderer from './mandatoryCreditRenderer.js';
 import log from 'electron-log';
 
-// Debug log file paths
-const DEBUG_LOG_PATH = path.join(os.homedir(), 'ClickStudio', 'lowerthird-debug.log');
-const AUDIO_LOG_PATH = path.join(os.homedir(), 'ClickStudio', 'audio-debug.log');
+// Debug log file paths - Comprehensive logging system
+const LOG_DIR = path.join(os.homedir(), 'ClickStudio', 'logs');
+const DEBUG_LOG_PATH = path.join(LOG_DIR, 'editor-debug.log');
+const AUDIO_LOG_PATH = path.join(LOG_DIR, 'audio-debug.log');
+const TIMELINE_LOG_PATH = path.join(LOG_DIR, 'timeline-debug.log');
+const EXPORT_LOG_PATH = path.join(LOG_DIR, 'export-debug.log');
 
 // Create log files immediately on module load
 try {
-    const dir = path.dirname(DEBUG_LOG_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(DEBUG_LOG_PATH, `\n\n========== VideoEditor loaded at ${new Date().toISOString()} ==========\n`);
-    fs.appendFileSync(AUDIO_LOG_PATH, `\n\n========== AUDIO DEBUG - ${new Date().toISOString()} ==========\n`);
+    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+    
+    const timestamp = new Date().toISOString();
+    const separator = `\n\n${'='.repeat(80)}\n`;
+    
+    fs.appendFileSync(DEBUG_LOG_PATH, `${separator}VideoEditor Session Started: ${timestamp}\n${'='.repeat(80)}\n`);
+    fs.appendFileSync(AUDIO_LOG_PATH, `${separator}Audio Session Started: ${timestamp}\n${'='.repeat(80)}\n`);
+    fs.appendFileSync(TIMELINE_LOG_PATH, `${separator}Timeline Session Started: ${timestamp}\n${'='.repeat(80)}\n`);
+    fs.appendFileSync(EXPORT_LOG_PATH, `${separator}Export Session Started: ${timestamp}\n${'='.repeat(80)}\n`);
 } catch (e) {
-    console.error('Failed to create debug log:', e);
+    console.error('Failed to create debug logs:', e);
 }
 
-// Helper for logging that goes to file
-function editorLog(msg) {
-    const logLine = `[${new Date().toISOString()}] [VideoEditor] ${msg}\n`;
-    console.log(`[VideoEditor] ${msg}`);
+// Centralized logging functions with categories
+function writeLog(filePath, category, msg) {
+    const logLine = `[${new Date().toISOString()}] [${category}] ${msg}\n`;
+    console.log(`[${category}] ${msg}`);
     try {
-        fs.appendFileSync(DEBUG_LOG_PATH, logLine);
+        fs.appendFileSync(filePath, logLine);
     } catch (e) {
         console.error('Log write failed:', e);
     }
 }
 
+// Helper for general editor logging
+function editorLog(msg) {
+    writeLog(DEBUG_LOG_PATH, 'VideoEditor', msg);
+}
+
 // Dedicated audio/music logging
 function audioLog(msg) {
-    const logLine = `[${new Date().toISOString()}] [AUDIO] ${msg}\n`;
-    console.log(`[AUDIO] ${msg}`);
-    try {
-        fs.appendFileSync(AUDIO_LOG_PATH, logLine);
-    } catch (e) {
-        console.error('Audio log write failed:', e);
+    writeLog(AUDIO_LOG_PATH, 'AUDIO', msg);
+}
+
+// Timeline-specific logging (segment timing, duration calculations)
+function timelineLog(msg) {
+    writeLog(TIMELINE_LOG_PATH, 'TIMELINE', msg);
+}
+
+// Export-specific logging (encoding, overlays, final output)
+function exportLog(msg) {
+    writeLog(EXPORT_LOG_PATH, 'EXPORT', msg);
+}
+
+// Enhanced export logging with categories
+const ExportLogger = {
+    sessionId: null,
+    startTime: null,
+    phases: {},
+    
+    // Start a new export session
+    startSession(outputPath) {
+        this.sessionId = Date.now().toString(36);
+        this.startTime = Date.now();
+        this.phases = {};
+        
+        const separator = '\n' + '═'.repeat(100) + '\n';
+        const header = `
+${separator}
+  EXPORT SESSION: ${this.sessionId}
+  Started: ${new Date().toISOString()}
+  Output: ${outputPath}
+${separator}`;
+        
+        try {
+            fs.appendFileSync(EXPORT_LOG_PATH, header);
+        } catch (e) {}
+        
+        this.info('SESSION', 'Export session started');
+        this.logSystemInfo();
+    },
+    
+    // Log system info at start
+    logSystemInfo() {
+        const cpus = os.cpus();
+        const totalMem = (os.totalmem() / 1024 / 1024 / 1024).toFixed(1);
+        const freeMem = (os.freemem() / 1024 / 1024 / 1024).toFixed(1);
+        
+        this.info('SYSTEM', `Platform: ${os.platform()} ${os.arch()}`);
+        this.info('SYSTEM', `CPU: ${cpus[0]?.model || 'Unknown'} (${cpus.length} cores)`);
+        this.info('SYSTEM', `Memory: ${freeMem}GB free / ${totalMem}GB total`);
+    },
+    
+    // Start a phase timer
+    startPhase(phase) {
+        this.phases[phase] = { start: Date.now(), end: null };
+        this.info(phase, `Phase started`);
+    },
+    
+    // End a phase timer
+    endPhase(phase, success = true) {
+        if (this.phases[phase]) {
+            this.phases[phase].end = Date.now();
+            const elapsed = ((this.phases[phase].end - this.phases[phase].start) / 1000).toFixed(2);
+            this.info(phase, `Phase ${success ? 'completed' : 'FAILED'} in ${elapsed}s`);
+            return parseFloat(elapsed);
+        }
+        return 0;
+    },
+    
+    // Log info message
+    info(category, msg) {
+        const elapsed = this.startTime ? `+${((Date.now() - this.startTime) / 1000).toFixed(1)}s` : '';
+        const logLine = `[${new Date().toISOString()}] [${elapsed.padStart(8)}] [${category.padEnd(12)}] ${msg}\n`;
+        console.log(`[EXPORT/${category}] ${msg}`);
+        try {
+            fs.appendFileSync(EXPORT_LOG_PATH, logLine);
+        } catch (e) {}
+    },
+    
+    // Log warning
+    warn(category, msg) {
+        this.info(category, `⚠️ WARNING: ${msg}`);
+    },
+    
+    // Log error
+    error(category, msg, error = null) {
+        this.info(category, `❌ ERROR: ${msg}`);
+        if (error?.stack) {
+            try {
+                fs.appendFileSync(EXPORT_LOG_PATH, `    Stack: ${error.stack}\n`);
+            } catch (e) {}
+        }
+    },
+    
+    // Log FFmpeg command
+    logFFmpegCommand(command) {
+        const separator = '-'.repeat(80);
+        try {
+            fs.appendFileSync(EXPORT_LOG_PATH, `\n${separator}\nFFMPEG COMMAND:\n${separator}\n${command}\n${separator}\n\n`);
+        } catch (e) {}
+        this.info('FFMPEG', `Command logged (${command.length} chars)`);
+    },
+    
+    // Log progress
+    progress(percent, fps, speed, eta) {
+        // Only log every 10%
+        if (percent % 10 === 0 || percent >= 99) {
+            this.info('PROGRESS', `${percent}% | FPS: ${fps || 'N/A'} | Speed: ${speed || 'N/A'}x | ETA: ${eta || 'calculating...'}`);
+        }
+    },
+    
+    // Log overlay generation
+    logOverlay(type, index, total, details) {
+        this.info('OVERLAY', `[${index}/${total}] ${type}: ${details}`);
+    },
+    
+    // Log encoder info
+    logEncoder(encoder, hwAccel) {
+        this.info('ENCODER', `Using: ${encoder} | Hardware Acceleration: ${hwAccel ? 'YES' : 'NO'}`);
+    },
+    
+    // Log file info
+    logFile(label, filePath, exists = null) {
+        if (exists === null) exists = fs.existsSync(filePath);
+        if (exists) {
+            try {
+                const stats = fs.statSync(filePath);
+                const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+                this.info('FILE', `${label}: ${filePath} (${sizeMB} MB)`);
+            } catch (e) {
+                this.info('FILE', `${label}: ${filePath} (size unknown)`);
+            }
+        } else {
+            this.warn('FILE', `${label}: ${filePath} (NOT FOUND)`);
+        }
+    },
+    
+    // End session with summary
+    endSession(success, outputPath = null) {
+        const totalTime = this.startTime ? ((Date.now() - this.startTime) / 1000).toFixed(2) : 'unknown';
+        
+        let summary = `\n${'═'.repeat(100)}\n  EXPORT ${success ? 'COMPLETED' : 'FAILED'}\n`;
+        summary += `  Session: ${this.sessionId}\n`;
+        summary += `  Total Time: ${totalTime}s\n`;
+        
+        if (outputPath && fs.existsSync(outputPath)) {
+            const stats = fs.statSync(outputPath);
+            const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+            summary += `  Output Size: ${sizeMB} MB\n`;
+        }
+        
+        summary += `\n  Phase Timings:\n`;
+        for (const [phase, times] of Object.entries(this.phases)) {
+            if (times.end) {
+                const elapsed = ((times.end - times.start) / 1000).toFixed(2);
+                summary += `    - ${phase}: ${elapsed}s\n`;
+            }
+        }
+        
+        summary += `${'═'.repeat(100)}\n\n`;
+        
+        try {
+            fs.appendFileSync(EXPORT_LOG_PATH, summary);
+        } catch (e) {}
+        
+        this.info('SESSION', success ? 'Export completed successfully' : 'Export failed');
+        
+        // Return summary for UI
+        return {
+            success,
+            sessionId: this.sessionId,
+            totalTime: parseFloat(totalTime),
+            phases: this.phases,
+            outputPath
+        };
     }
+};
+
+// Performance timing helper
+function logTiming(label, startTime) {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+    editorLog(`[TIMING] ${label}: ${elapsed}s`);
+    return elapsed;
 }
 
 // Set ffmpeg path globally
@@ -385,6 +574,22 @@ class VideoEditorEngine {
             // Generar thumbnail para UI
             await this.generateThumbnail(trimmedPath, thumbnailPath);
 
+            // CRITICAL: Verify actual duration of processed clip
+            // This ensures timeline calculations use real durations, not expected ones
+            let actualDuration = clipDuration;
+            try {
+                actualDuration = await this.getMediaDuration(trimmedPath);
+                const durationDiff = Math.abs(actualDuration - clipDuration);
+                
+                if (durationDiff > 0.1) {
+                    editorLog(`[Duration] Segment ${segmentIndex}: Expected ${clipDuration.toFixed(2)}s, Actual ${actualDuration.toFixed(2)}s (diff: ${durationDiff.toFixed(2)}s)`);
+                } else {
+                    editorLog(`[Duration] Segment ${segmentIndex}: ${actualDuration.toFixed(2)}s (OK)`);
+                }
+            } catch (e) {
+                editorLog(`[Duration] Warning: Could not verify duration for segment ${segmentIndex}: ${e.message}`);
+            }
+
             // Añadir o reemplazar en timeline
             const existingIndex = this.timeline.findIndex(c => c.index === segmentIndex);
             const clipData = {
@@ -393,7 +598,8 @@ class VideoEditorEngine {
                 processedVideo: trimmedPath,
                 previewUrl: `file://${trimmedPath}`, // Para Electron/React
                 thumbnail: `file://${thumbnailPath}`,
-                duration: clipDuration,
+                duration: actualDuration,  // Use ACTUAL duration, not expected
+                expectedDuration: clipDuration,  // Keep expected for reference
                 headline,
                 options
             };
@@ -447,18 +653,24 @@ class VideoEditorEngine {
                     .setDuration(targetDuration); // Exact duration of the SEGMENT
 
                 // Video filter for scaling (logo is applied ONLY in exportFinalVideo to avoid duplication)
-                const videoFilter = 'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1';
+                // CRITICAL: Include fps=30 to standardize frame rate across ALL clips
+                // This prevents freezing/stuttering when concatenating clips with different source FPS
+                const videoFilter = 'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30';
 
                 // No logo here - use simple -vf filter (logo applied at export time)
+                // CRITICAL: Force 30fps output to ensure all clips have identical frame rate for concat
                 command.outputOptions([
                     '-vf', videoFilter,
+                    '-r', '30',           // Force 30fps output (matches fps filter)
+                    '-vsync', 'cfr',      // Constant frame rate (prevents dropped/duplicated frames)
                     '-c:v', 'libx264',
                     '-preset', 'ultrafast',
                     '-crf', '28',
                     '-pix_fmt', 'yuv420p',
-                    '-avoid_negative_ts', 'make_zero'
+                    '-avoid_negative_ts', 'make_zero',
+                    '-video_track_timescale', '30000'  // Consistent timescale for smooth concat
                 ]);
-                console.log('[Editor] Using video filter (logo will be applied at export)');
+                editorLog(`[Clip] Processing with standardized 30fps, filter: ${videoFilter}`);
 
                 // Audio - Mute original video audio to prioritize narration
                 if (options.volume === 0) {
@@ -621,12 +833,24 @@ class VideoEditorEngine {
 
         const finalPath = path.join(targetDir, fileName);
 
+        // ============ ENHANCED EXPORT LOGGING ============
+        ExportLogger.startSession(finalPath);
+        ExportLogger.startPhase('INITIALIZATION');
+        
+        ExportLogger.info('CONFIG', `Resolution: ${width}x${height} (${resolution})`);
+        ExportLogger.info('CONFIG', `FPS: ${fps}, Codec: ${codec}, Bitrate: ${videoBitrate}`);
+        ExportLogger.info('CONFIG', `Lower Thirds: ${enableLowerThirds ? 'ON' : 'OFF'}, Mandatory Credits: ${enableMandatoryCredits ? 'ON' : 'OFF'}`);
+        ExportLogger.logEncoder(vCodec, vCodec.includes('nvenc') || vCodec.includes('qsv') || vCodec.includes('amf'));
+        ExportLogger.logFile('Output', finalPath, false);
+
         console.log(`[Editor] Starting final export: ${resolution} @ ${fps}fps, Codec: ${vCodec} (requested ${codec}), Bitrate: ${videoBitrate}`);
         console.log(`[Editor] Output Path: ${finalPath}`);
 
         onProgress({ stage: 'preparing', percent: 0 });
 
         const sortedClips = [...this.timeline].sort((a, b) => a.index - b.index);
+        
+        ExportLogger.info('TIMELINE', `Clips: ${sortedClips.length}`);
 
         // Prepare list with robust path handling
         const listPath = path.join(this.tempDir, 'final_list.txt');
@@ -649,11 +873,35 @@ class VideoEditorEngine {
             return `file '${safePath}'`;
         }).filter(Boolean).join('\n');
 
-        console.log('[Editor] Concat List Content Preview:\n', listContent.substring(0, 500) + '...');
+        // ============ TIMELINE VALIDATION & LOGGING ============
+        exportLog('========== EXPORT STARTED ==========');
+        exportLog(`Resolution: ${resolution}, FPS: ${fps}, Codec: ${codec}, Bitrate: ${videoBitrate}`);
+        exportLog(`Output: ${finalPath}`);
+        
+        // Log timeline details
+        timelineLog('========== TIMELINE CLIPS ==========');
+        let totalExpectedDuration = 0;
+        sortedClips.forEach((clip, i) => {
+            const actualDur = clip.duration || 0;
+            const expectedDur = clip.expectedDuration || actualDur;
+            totalExpectedDuration += actualDur;
+            timelineLog(`Clip ${i}: idx=${clip.index}, duration=${actualDur.toFixed(2)}s (expected: ${expectedDur.toFixed(2)}s), file=${path.basename(clip.processedVideo || 'N/A')}`);
+            ExportLogger.info('TIMELINE', `Clip ${i}: ${actualDur.toFixed(2)}s - ${path.basename(clip.processedVideo || 'N/A')}`);
+            ExportLogger.logFile(`Clip ${i}`, clip.processedVideo || clip.videoPath);
+        });
+        timelineLog(`Total timeline duration: ${totalExpectedDuration.toFixed(2)}s`);
+        ExportLogger.info('TIMELINE', `Total duration: ${totalExpectedDuration.toFixed(2)}s`);
+        
+        exportLog(`Concat list: ${sortedClips.length} clips, total duration: ${totalExpectedDuration.toFixed(2)}s`);
+        
+        ExportLogger.endPhase('INITIALIZATION');
 
         // Validate that we have clips to export
         if (!listContent || listContent.trim().length === 0) {
             const error = new Error('No video clips available for export. Please ensure videos have been downloaded for all segments.');
+            exportLog(`ERROR: ${error.message}`);
+            ExportLogger.error('VALIDATION', 'No video clips available', error);
+            ExportLogger.endSession(false);
             onProgress({ stage: 'error', error: error.message });
             throw error;
         }
@@ -667,6 +915,7 @@ class VideoEditorEngine {
         // Fixed overlay duration for performance (5 seconds = 150 frames)
         // FFmpeg handles timing with enable='between(t,start,end)'
         const OVERLAY_DURATION_SECONDS = 5;
+        exportLog(`Overlay duration: ${OVERLAY_DURATION_SECONDS}s per segment`);
 
         const lowerThirdOverlays = []; // { path, startTime, endTime }
         const mandatoryCreditOverlays = []; // { path, startTime, endTime }
@@ -689,6 +938,9 @@ class VideoEditorEngine {
         editorLog(`Total overlays to generate: ${totalOverlays} (${segmentsWithHeadline} lower thirds, ${segmentsWithCredit} mandatory credits)`);
 
         if (totalOverlays > 0) {
+            ExportLogger.startPhase('OVERLAYS');
+            ExportLogger.info('OVERLAYS', `Generating ${totalOverlays} overlays (${segmentsWithHeadline} lower thirds, ${segmentsWithCredit} mandatory credits) - PARALLEL MODE`);
+            
             onProgress({
                 stage: 'generating_overlays',
                 percent: 0,
@@ -697,7 +949,12 @@ class VideoEditorEngine {
                 overlayType: 'preparing'
             });
 
-            let overlaysGenerated = 0;
+            const overlayStartTime = Date.now();
+            exportLog('========== GENERATING OVERLAYS (PARALLEL) ==========');
+
+            // ============ PARALLEL OVERLAY RENDERING ============
+            // Step 1: Prepare all overlay tasks with timing information
+            const overlayTasks = [];
             let cumulativeTime = 0;
 
             for (let i = 0; i < sortedClips.length; i++) {
@@ -706,85 +963,162 @@ class VideoEditorEngine {
                 const clipDuration = clip.duration || 5;
                 const headline = seg ? (seg.headline || seg.title) : null;
                 const mandatoryCredit = seg ? seg.mandatoryCredit : null;
+                const segmentStartTime = cumulativeTime;
+                const segmentEndTime = cumulativeTime + clipDuration;
 
-                // Generate MANDATORY CREDIT first (top-left corner)
+                timelineLog(`Segment ${i}: startTime=${segmentStartTime.toFixed(2)}s, duration=${clipDuration.toFixed(2)}s, endTime=${segmentEndTime.toFixed(2)}s`);
+
+                // Queue mandatory credit task
                 if (enableMandatoryCredits && mandatoryCredit && mandatoryCredit.trim()) {
-                    editorLog(`Mandatory credit ${i + 1}: "${mandatoryCredit}"`);
-
-                    onProgress({
-                        stage: 'generating_overlays',
-                        percent: Math.round((overlaysGenerated / totalOverlays) * 100),
-                        totalOverlays,
-                        currentOverlay: overlaysGenerated + 1,
-                        overlayType: 'mandatory_credit',
-                        overlayText: mandatoryCredit.substring(0, 40) + (mandatoryCredit.length > 40 ? '...' : ''),
-                        segmentIndex: i + 1,
-                        totalSegments: sortedClips.length
+                    overlayTasks.push({
+                        type: 'mandatory_credit',
+                        segmentIndex: i,
+                        text: mandatoryCredit,
+                        startTime: segmentStartTime,
+                        endTime: segmentEndTime
                     });
-
-                    try {
-                        const creditPath = await mandatoryCreditRenderer.renderMandatoryCredit({
-                            text: mandatoryCredit,
-                            durationInSeconds: OVERLAY_DURATION_SECONDS, // Fixed 5s duration
-                            segmentId: i
-                        });
-
-                        if (creditPath) {
-                            mandatoryCreditOverlays.push({
-                                path: creditPath,
-                                startTime: cumulativeTime,
-                                endTime: cumulativeTime + clipDuration // Full segment duration for FFmpeg
-                            });
-                            editorLog(`✓ Mandatory credit: ${creditPath}`);
-                        }
-                        overlaysGenerated++;
-                    } catch (error) {
-                        editorLog(`ERROR mandatory credit ${i}: ${error.message}`);
-                        overlaysGenerated++; // Still count as processed
-                    }
                 }
 
-                // Generate LOWER THIRD (bottom center)
+                // Queue lower third task
                 if (enableLowerThirds && headline) {
-                    editorLog(`Lower third ${i + 1}: "${headline}"`);
-
-                    onProgress({
-                        stage: 'generating_overlays',
-                        percent: Math.round((overlaysGenerated / totalOverlays) * 100),
-                        totalOverlays,
-                        currentOverlay: overlaysGenerated + 1,
-                        overlayType: 'lower_third',
-                        overlayText: headline.substring(0, 40) + (headline.length > 40 ? '...' : ''),
-                        segmentIndex: i + 1,
-                        totalSegments: sortedClips.length
+                    overlayTasks.push({
+                        type: 'lower_third',
+                        segmentIndex: i,
+                        text: headline,
+                        startTime: segmentStartTime,
+                        endTime: segmentEndTime
                     });
-
-                    try {
-                        const ltPath = await lowerThirdRenderer.renderLowerThird({
-                            headline,
-                            durationInSeconds: OVERLAY_DURATION_SECONDS, // Fixed 5s duration
-                            segmentId: i
-                        });
-
-                        if (ltPath) {
-                            lowerThirdOverlays.push({
-                                path: ltPath,
-                                startTime: cumulativeTime,
-                                endTime: cumulativeTime + clipDuration // Full segment duration for FFmpeg
-                            });
-                            editorLog(`✓ Lower third: ${ltPath}`);
-                        }
-                        overlaysGenerated++;
-                    } catch (error) {
-                        editorLog(`ERROR lower third ${i}: ${error.message}`);
-                        overlaysGenerated++; // Still count as processed
-                    }
                 }
 
                 cumulativeTime += clipDuration;
             }
 
-            editorLog(`Generated ${mandatoryCreditOverlays.length} mandatory credits, ${lowerThirdOverlays.length} lower thirds`);
+            // Step 2: Sort tasks - mandatory credits first, then lower thirds
+            // This ensures clean sequential display in the UI
+            overlayTasks.sort((a, b) => {
+                if (a.type === 'mandatory_credit' && b.type === 'lower_third') return -1;
+                if (a.type === 'lower_third' && b.type === 'mandatory_credit') return 1;
+                return a.segmentIndex - b.segmentIndex;
+            });
+
+            // Step 3: Execute tasks SEQUENTIALLY for clean UI progress
+            let completedCount = 0;
+            const results = [];
+
+            for (let i = 0; i < overlayTasks.length; i++) {
+                const task = overlayTasks[i];
+                const taskType = task.type === 'mandatory_credit' ? 'MC' : 'LT';
+                const currentOverlayNum = i + 1;
+                
+                editorLog(`[OVERLAY] Starting ${taskType} ${currentOverlayNum}/${totalOverlays} for segment ${task.segmentIndex}: "${task.text.substring(0, 30)}..."`);
+                
+                // Send initial progress
+                onProgress({
+                    stage: 'generating_overlays',
+                    totalOverlays,
+                    currentOverlay: currentOverlayNum,
+                    overlayType: task.type,
+                    overlayText: task.text.substring(0, 40) + (task.text.length > 40 ? '...' : ''),
+                    segmentIndex: task.segmentIndex + 1,
+                    totalSegments: sortedClips.length,
+                    renderProgress: 0
+                });
+
+                try {
+                    let resultPath;
+                    
+                    // Progress callback - directly forwards to UI
+                    const onRenderProgress = (progressInfo) => {
+                        onProgress({
+                            stage: 'generating_overlays',
+                            totalOverlays,
+                            currentOverlay: currentOverlayNum,
+                            overlayType: task.type,
+                            overlayText: task.text.substring(0, 40) + (task.text.length > 40 ? '...' : ''),
+                            segmentIndex: task.segmentIndex + 1,
+                            totalSegments: sortedClips.length,
+                            renderProgress: progressInfo.percent
+                        });
+                    };
+                    
+                    if (task.type === 'mandatory_credit') {
+                        resultPath = await mandatoryCreditRenderer.renderMandatoryCredit({
+                            text: task.text,
+                            durationInSeconds: OVERLAY_DURATION_SECONDS,
+                            segmentId: task.segmentIndex,
+                            onProgress: onRenderProgress
+                        });
+                    } else {
+                        resultPath = await lowerThirdRenderer.renderLowerThird({
+                            headline: task.text,
+                            durationInSeconds: OVERLAY_DURATION_SECONDS,
+                            segmentId: task.segmentIndex,
+                            onProgress: onRenderProgress
+                        });
+                    }
+                    
+                    completedCount++;
+
+                    if (resultPath) {
+                        editorLog(`[OVERLAY] ✓ ${taskType} ${currentOverlayNum}/${totalOverlays}: ${path.basename(resultPath)}`);
+                        results.push({
+                            success: true,
+                            path: resultPath,
+                            type: task.type,
+                            startTime: task.startTime,
+                            endTime: task.endTime,
+                            segmentIndex: task.segmentIndex
+                        });
+                    } else {
+                        results.push({ success: false, type: task.type, segmentIndex: task.segmentIndex });
+                    }
+                } catch (error) {
+                    completedCount++;
+                    editorLog(`[OVERLAY] ✗ ${taskType} ${currentOverlayNum}/${totalOverlays} FAILED: ${error.message}`);
+                    results.push({ success: false, type: task.type, segmentIndex: task.segmentIndex, error: error.message });
+                }
+            }
+
+            // Step 4: Collect results and sort into correct arrays
+            for (const result of results) {
+                if (result && result.success && result.path) {
+                    const overlayData = {
+                        path: result.path,
+                        startTime: result.startTime,
+                        endTime: result.endTime
+                    };
+
+                    if (result.type === 'mandatory_credit') {
+                        mandatoryCreditOverlays.push(overlayData);
+                    } else if (result.type === 'lower_third') {
+                        lowerThirdOverlays.push(overlayData);
+                    }
+                }
+            }
+
+            // Sort overlays by startTime to ensure correct order
+            mandatoryCreditOverlays.sort((a, b) => a.startTime - b.startTime);
+            lowerThirdOverlays.sort((a, b) => a.startTime - b.startTime);
+
+            const overlayElapsed = ((Date.now() - overlayStartTime) / 1000).toFixed(2);
+            const successCount = mandatoryCreditOverlays.length + lowerThirdOverlays.length;
+            const failedCount = totalOverlays - successCount;
+            
+            exportLog(`Generated ${mandatoryCreditOverlays.length} mandatory credits, ${lowerThirdOverlays.length} lower thirds in ${overlayElapsed}s (${failedCount} failed)`);
+            
+            ExportLogger.endPhase('OVERLAYS');
+            ExportLogger.info('OVERLAYS', `Generated ${successCount}/${totalOverlays} overlays in ${overlayElapsed}s`);
+            
+            // Log overlay timing details
+            timelineLog('========== OVERLAY TIMING SUMMARY ==========');
+            mandatoryCreditOverlays.forEach((mc, i) => {
+                timelineLog(`MandatoryCredit ${i}: ${mc.startTime.toFixed(2)}s - ${mc.endTime.toFixed(2)}s`);
+                ExportLogger.logOverlay('MandatoryCredit', i + 1, mandatoryCreditOverlays.length, `${mc.startTime.toFixed(2)}s - ${mc.endTime.toFixed(2)}s`);
+            });
+            lowerThirdOverlays.forEach((lt, i) => {
+                timelineLog(`LowerThird ${i}: ${lt.startTime.toFixed(2)}s - ${lt.endTime.toFixed(2)}s`);
+                ExportLogger.logOverlay('LowerThird', i + 1, lowerThirdOverlays.length, `${lt.startTime.toFixed(2)}s - ${lt.endTime.toFixed(2)}s`);
+            });
 
             onProgress({
                 stage: 'generating_overlays',
@@ -795,6 +1129,9 @@ class VideoEditorEngine {
             });
         }
         // ============ END OVERLAYS GENERATION ============
+        
+        ExportLogger.startPhase('FFMPEG_ENCODE');
+        exportLog('========== STARTING FFMPEG ENCODE ==========');
 
         return new Promise((resolve, reject) => {
             let command = ffmpeg()
@@ -1091,34 +1428,52 @@ class VideoEditorEngine {
             // This ensures predictable file sizes and quality
             const bufferSize = `${videoBitrateKbps * 2}k`; // 2x bitrate buffer
 
+            // Use all available CPU threads for faster encoding
+            outputOptions.push('-threads', '0');
+
             if (vCodec === 'libx264' || vCodec === 'libx265') {
                 // CPU Software Encoding with 2-pass style quality via maxrate/bufsize
-                outputOptions.push(`-preset`, 'medium');
-                outputOptions.push(`-b:v`, videoBitrate);
-                outputOptions.push(`-maxrate`, videoBitrate);
-                outputOptions.push(`-bufsize`, bufferSize);
+                outputOptions.push('-preset', 'medium');
+                outputOptions.push('-b:v', videoBitrate);
+                outputOptions.push('-maxrate', videoBitrate);
+                outputOptions.push('-bufsize', bufferSize);
             } else {
                 // Hardware Encoding (NVENC/QSV/AMF) - use bitrate mode
-                outputOptions.push(`-b:v`, videoBitrate);
-                outputOptions.push(`-maxrate`, videoBitrate);
-                outputOptions.push(`-bufsize`, bufferSize);
+                outputOptions.push('-b:v', videoBitrate);
+                outputOptions.push('-maxrate', videoBitrate);
+                outputOptions.push('-bufsize', bufferSize);
 
                 if (vCodec.includes('nvenc')) {
+                    // NVIDIA NVENC optimized settings
                     outputOptions.push('-rc', 'vbr');
-                    outputOptions.push('-preset', 'p4'); // Medium preset for NVENC
+                    outputOptions.push('-preset', 'p5');  // Faster than p4, same quality with VBR
+                    outputOptions.push('-tune', 'hq');    // High quality tuning
+                    outputOptions.push('-rc-lookahead', '20'); // Lookahead for better quality
                 } else if (vCodec.includes('qsv')) {
+                    // Intel Quick Sync optimized settings
                     outputOptions.push('-preset', 'medium');
+                    outputOptions.push('-async_depth', '4'); // Async encoding for better throughput
                 } else if (vCodec.includes('amf')) {
+                    // AMD AMF optimized settings
                     outputOptions.push('-quality', 'balanced');
+                    outputOptions.push('-rc', 'vbr_latency'); // VBR with low latency
                 }
             }
+
+            // Track encoding stats for logging
+            let lastLoggedPercent = 0;
+            let encodingStartTime = null;
+            const totalDuration = this.timeline.reduce((acc, clip) => acc + (clip.duration || 0), 0);
 
             command
                 .outputOptions(outputOptions)
 
                 .on('start', (commandLine) => {
+                    encodingStartTime = Date.now();
                     console.log('[Editor] FFmpeg command:', commandLine);
                     editorLog(`FFmpeg command: ${commandLine}`);
+                    ExportLogger.logFFmpegCommand(commandLine);
+                    ExportLogger.info('FFMPEG', `Starting encode. Total duration: ${totalDuration.toFixed(2)}s`);
                     audioLog('========== FFMPEG COMMAND ==========');
                     audioLog(commandLine);
                     audioLog('=====================================');
@@ -1126,15 +1481,13 @@ class VideoEditorEngine {
                 .on('progress', (progress) => {
                     // Calculate manual percentage because FFmpeg concat often reports > 100% or wrong values
                     let percent = 0;
+                    let currentSeconds = 0;
                     if (progress.timemark) {
                         const parts = progress.timemark.split(':');
-                        const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
-
-                        // Calculate total duration from timeline
-                        const totalDuration = this.timeline.reduce((acc, clip) => acc + (clip.duration || 0), 0);
+                        currentSeconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
 
                         if (totalDuration > 0) {
-                            percent = (seconds / totalDuration) * 100;
+                            percent = (currentSeconds / totalDuration) * 100;
                         }
                     } else if (progress.percent) {
                         percent = progress.percent;
@@ -1142,28 +1495,64 @@ class VideoEditorEngine {
 
                     // Clamp
                     percent = Math.min(Math.max(percent, 0), 99);
+                    const roundedPercent = Math.round(percent);
+
+                    // Calculate ETA
+                    let eta = 'calculating...';
+                    if (encodingStartTime && currentSeconds > 0 && percent > 0) {
+                        const elapsed = (Date.now() - encodingStartTime) / 1000;
+                        const estimatedTotal = elapsed / (percent / 100);
+                        const remaining = Math.max(0, estimatedTotal - elapsed);
+                        if (remaining < 60) {
+                            eta = `${Math.round(remaining)}s`;
+                        } else {
+                            eta = `${Math.floor(remaining / 60)}m ${Math.round(remaining % 60)}s`;
+                        }
+                    }
+
+                    // Log every 10% progress
+                    if (roundedPercent >= lastLoggedPercent + 10) {
+                        lastLoggedPercent = Math.floor(roundedPercent / 10) * 10;
+                        ExportLogger.progress(lastLoggedPercent, progress.currentFps, null, eta);
+                    }
 
                     onProgress({
                         stage: 'encoding',
                         percent: percent,
                         fps: progress.currentFps,
-                        time: progress.timemark
+                        time: progress.timemark,
+                        eta: eta
                     });
                 })
                 .on('end', () => {
                     this.currentExportCommand = null;
+                    ExportLogger.endPhase('FFMPEG_ENCODE');
+                    
                     if (!this.exportCancelled) {
-                        onProgress({ stage: 'complete', percent: 100, outputPath: finalPath });
+                        ExportLogger.logFile('Final Output', finalPath);
+                        const summary = ExportLogger.endSession(true, finalPath);
+                        onProgress({ 
+                            stage: 'complete', 
+                            percent: 100, 
+                            outputPath: finalPath,
+                            exportSummary: summary
+                        });
                         resolve(finalPath);
                     }
                 })
                 .on('error', (err) => {
                     this.currentExportCommand = null;
+                    ExportLogger.error('FFMPEG', `Encoding failed: ${err.message}`, err);
+                    ExportLogger.endPhase('FFMPEG_ENCODE', false);
+                    
                     if (this.exportCancelled) {
                         // User cancelled - not an error
+                        ExportLogger.info('SESSION', 'Export cancelled by user');
+                        ExportLogger.endSession(false);
                         onProgress({ stage: 'cancelled', percent: 0 });
                         resolve(null);
                     } else {
+                        ExportLogger.endSession(false);
                         onProgress({ stage: 'error', error: err.message });
                         reject(err);
                     }

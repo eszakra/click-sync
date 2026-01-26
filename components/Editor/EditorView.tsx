@@ -115,6 +115,40 @@ export const EditorView: React.FC<EditorProps> = ({
         }
     }, [segments, selectedSegmentIndex]);
 
+    // ============ PRE-RENDER OVERLAYS IN BACKGROUND ============
+    // Trigger batch pre-render when editor loads with segments
+    useEffect(() => {
+        if (segments.length > 0 && window.electron?.invoke) {
+            // Prepare segments data for pre-rendering
+            const segmentsForPreRender = segments.map((seg, idx) => ({
+                index: idx,
+                headline: seg.headline || seg.title || '',
+                title: seg.title || seg.headline || '',
+                duration: seg.duration || 5,
+                mandatoryCredit: (seg as any).mandatoryCredit || ''
+            }));
+            
+            // Queue batch pre-render in background
+            window.electron.invoke('prerender-overlays-batch', segmentsForPreRender)
+                .then((result: any) => {
+                    if (result?.queued > 0) {
+                        console.log(`[EditorView] Pre-render queued: ${result.queued} overlays`);
+                    }
+                })
+                .catch((err: any) => {
+                    console.log('[EditorView] Pre-render batch failed:', err);
+                });
+        }
+    }, [segments.length]); // Only run when segments array changes
+
+    // Prioritize pre-render when user selects a segment
+    useEffect(() => {
+        if (selectedSegmentIndex !== null && window.electron?.invoke) {
+            window.electron.invoke('prerender-prioritize-segment', selectedSegmentIndex)
+                .catch(() => {}); // Ignore errors
+        }
+    }, [selectedSegmentIndex]);
+
     // Find segment at current time and sync video
     useEffect(() => {
         const seg = segments.find(s =>

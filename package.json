@@ -2,7 +2,7 @@
   "name": "click-sync",
   "productName": "Click Sync",
   "private": true,
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "AI-Powered Video Matching & Audio Transcription Studio",
   "author": "ClickSync Team",
   "type": "module",
@@ -127,18 +127,21 @@
           ]
         }
       ],
-      "icon": "public/favicon.ico"
+      "icon": "public/favicon.ico",
+      "requestedExecutionLevel": "requireAdministrator"
     },
     "nsis": {
       "oneClick": false,
       "perMachine": true,
       "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
       "installerIcon": "public/favicon.ico",
       "uninstallerIcon": "public/favicon.ico",
       "installerHeaderIcon": "public/favicon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "ClickSync"
+      "shortcutName": "ClickSync",
+      "runAfterFinish": true
     },
     "publish": [
       {

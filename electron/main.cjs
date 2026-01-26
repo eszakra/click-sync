@@ -657,6 +657,10 @@ function createWindow() {
     });
 }
 
+// Global server reference for health checks
+let serverInstance = null;
+let serverHealthCheckInterval = null;
+
 async function startServer() {
     // In production, start the embedded server directly
     // In development, the server is started separately via npm run server
@@ -672,8 +676,11 @@ async function startServer() {
             // Dynamic import using file:// URL
             const serverModule = await import(serverUrl);
             if (serverModule && serverModule.startServer) {
-                await serverModule.startServer();
+                serverInstance = await serverModule.startServer();
                 console.log('[Electron] Server started successfully in-process');
+                
+                // Start health check to ensure server stays alive
+                startServerHealthCheck();
             } else {
                 const errMsg = 'No se encontró la función startServer en server.js';
                 console.error('[Electron]', errMsg);
@@ -689,6 +696,52 @@ async function startServer() {
                 `${errMsg}\n\nPosibles causas:\n1. Chromium/Playwright no instalado\n2. Firewall bloqueando puerto 5000\n3. Puerto 5000 ocupado por otra app\n\nDetalles técnicos:\n${e.stack ? e.stack.substring(0, 500) : 'N/A'}`);
         }
     }
+}
+
+// Health check to ensure server is always running
+function startServerHealthCheck() {
+    // Clear any existing interval
+    if (serverHealthCheckInterval) {
+        clearInterval(serverHealthCheckInterval);
+    }
+    
+    // Check every 30 seconds
+    serverHealthCheckInterval = setInterval(async () => {
+        try {
+            const http = require('http');
+            const req = http.get('http://localhost:5000/', { timeout: 5000 }, (res) => {
+                // Server is responding, all good
+                if (res.statusCode !== 200 && res.statusCode !== 404) {
+                    console.log(`[Server Health] Unexpected status: ${res.statusCode}`);
+                }
+            });
+            
+            req.on('error', async (err) => {
+                console.error('[Server Health] Server not responding, attempting restart...', err.message);
+                // Try to restart server
+                try {
+                    const serverPath = path.join(__dirname, '../server.js');
+                    const serverUrl = pathToFileURL(serverPath).href;
+                    const serverModule = await import(serverUrl);
+                    if (serverModule && serverModule.startServer) {
+                        serverInstance = await serverModule.startServer();
+                        console.log('[Server Health] Server restarted successfully');
+                    }
+                } catch (restartErr) {
+                    console.error('[Server Health] Failed to restart server:', restartErr.message);
+                }
+            });
+            
+            req.on('timeout', () => {
+                req.destroy();
+                console.warn('[Server Health] Server health check timed out');
+            });
+        } catch (e) {
+            console.error('[Server Health] Health check error:', e.message);
+        }
+    }, 30000); // Every 30 seconds
+    
+    console.log('[Server Health] Health check started (every 30s)');
 }
 
 // Dedicated Viory Login Browser (separate from scraping browser)
@@ -1057,6 +1110,13 @@ app.on('before-quit', (event) => {
     if (isCleaningUp) return;
 
     console.log('[Main] App before-quit: Starting cleanup...');
+    
+    // Stop server health check
+    if (serverHealthCheckInterval) {
+        clearInterval(serverHealthCheckInterval);
+        serverHealthCheckInterval = null;
+        console.log('[Main] Server health check stopped');
+    }
 
     // Check if there's anything async to clean up
     if (vioryDownloader && vioryDownloader.browser) {
@@ -1651,355 +1711,221 @@ function createSimpleSegment(block, index) {
     };
 }
 
-// --- ROBUST PROCESSOR WITH GEMINI SMART QUERIES ---
+// --- ROBUST PROCESSOR WITH INTELLIGENT SEARCH AND DOWNLOAD ---
+// Uses the new intelligentSearchAndDownload() method with:
+// - Gemini AI analysis for smart queries
+// - Visual validation with Gemini Vision
+// - Automatic My Content handling (wait 4 min, then try alternatives)
 // @param excludeUrls - Optional Set of video URLs to exclude (used by "Find Different" to avoid repeating videos)
 async function processSegmentRobustly(segment, logToUI, mainWindow, previousAnalysis = null, excludeUrls = null) {
-    // OPTIMIZED: Faster initial retries, then back off
-    // ORIGINAL: const RETRY_DELAYS = [2000, 4000, 8000, 15000, 30000];
-    const RETRY_DELAYS = [1000, 2000, 4000, 8000, 15000];
     const VIDEO_MIN_MARGIN = 8; // seconds
-    const MAX_VIDEOS_TO_ANALYZE = 15; // Analyze more videos for better matching
 
     // CRITICAL: Set status to 'searching' at the START of processing
     segment.status = 'searching';
     if (mainWindow) mainWindow.webContents.send('smart-timeline-update', { segments: activeTimelineSegments });
 
-    let attempts = 0;
-    let success = false;
     let finalVideoPath = null;
     let finalDuration = 0;
-    let primaryVideo = null; // Store the selected video for metadata (mandatoryCredit, title)
-    
-    // Initialize usedVideoUrls with any excluded URLs (for "Find Different" functionality)
-    const usedVideoUrls = new Set(excludeUrls || []);
-    
+    let primaryVideo = null;
+
     // Log if we're excluding videos (Find Different mode)
-    if (usedVideoUrls.size > 0) {
-        logToUI(`[Find Different] Excluding ${usedVideoUrls.size} previously used video(s) from search`);
+    if (excludeUrls && excludeUrls.size > 0) {
+        logToUI(`[Find Different] Excluding ${excludeUrls.size} previously used video(s) from search`);
     }
 
-    // Generate smart queries using Gemini AI
-    logToUI(`[AI] Generating smart queries for: "${segment.headline || segment.query}"`);
+    const headline = segment.headline || segment.query || '';
+    const text = segment.text || '';
 
-    let smartResult;
+    logToUI(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    logToUI(`[Segment ${segment.index + 1}] Starting Intelligent Search`);
+    logToUI(`[Headline] "${headline.substring(0, 60)}${headline.length > 60 ? '...' : ''}"`);
+
     try {
-        smartResult = await generateSmartQueries(
-            segment.headline || segment.query,
-            segment.text || '',
-            previousAnalysis
-        );
-        
-        // Check if there was an API error (fallback was used)
-        if (smartResult.error) {
-            logToUI(`[AI] ⚠️ ${smartResult.error}`);
-        }
-        
-        logToUI(`[AI] Generated ${smartResult.queries.length} queries: ${smartResult.queries.slice(0, 3).join(', ')}...`);
+        // Get Gemini API key
+        const geminiApiKey = getGeminiApiKey();
 
-        if (smartResult.analysis && smartResult.analysis.main_person) {
-            logToUI(`[AI] Detected person: ${smartResult.analysis.main_person}`);
-        }
-    } catch (e) {
-        const errorMsg = e.message || 'Unknown error';
-        logToUI(`[AI] ⚠️ Smart query generation failed: ${errorMsg}`);
-        logToUI(`[AI] Using fallback query generation`);
-        smartResult = {
-            queries: generateFallbackQueries(segment.headline || segment.query),
-            analysis: { block_type: 'GENERIC', main_person: null }
-        };
-    }
-
-    const queries = smartResult.queries;
-    const analysis = smartResult.analysis;
-
-    // Store analysis for continuity with next segment
-    segment._analysis = analysis;
-
-    // Organize queries into priority tiers
-    // Tier 1: First 2 queries (most specific - person name + action)
-    // Tier 2: Queries 3-4 (moderately specific)
-    // Tier 3: Remaining queries (generic/footage)
-    const tier1Queries = queries.slice(0, 2);
-    const tier2Queries = queries.slice(2, 4);
-    const tier3Queries = queries.slice(4);
-
-    // IMPROVED: Detect persona segment by checking if main_person exists OR first queries contain person names
-    // Don't rely solely on block_type since Gemini may not always return 'PERSONA'
-    let isPersonaSegment = analysis && analysis.main_person;
-
-    // Also detect person from queries (if first query looks like a person name)
-    let detectedPerson = analysis?.main_person || null;
-    if (!detectedPerson && tier1Queries.length > 0) {
-        // Check if first query contains what looks like a person name (2+ capitalized words)
-        const firstQuery = tier1Queries[0] || '';
-        const words = firstQuery.split(' ');
-        const capitalizedWords = words.filter(w => w.length > 2 && w[0] === w[0].toUpperCase());
-        if (capitalizedWords.length >= 2) {
-            // Likely a person name like "He Lifeng" or "Donald Trump"
-            detectedPerson = capitalizedWords.join(' ');
-            isPersonaSegment = true;
-            // Update analysis for scoring
-            if (analysis) {
-                analysis.main_person = detectedPerson;
-                analysis.block_type = 'PERSONA';
-            }
-        }
-    }
-
-    logToUI(`[Search] Strategy: ${isPersonaSegment ? 'PERSONA' : 'GENERIC'} mode`);
-    logToUI(`[Search] Analysis: block_type=${analysis?.block_type || 'N/A'}, main_person=${analysis?.main_person || 'none'}`);
-    if (isPersonaSegment && detectedPerson) {
-        logToUI(`[Search] ★ Priority: Must find "${detectedPerson}" in video`);
-    }
-    logToUI(`[Search] Queries: Tier1=${tier1Queries.length}, Tier2=${tier2Queries.length}, Tier3=${tier3Queries.length}`);
-
-    // Helper function to search a list of queries
-    const searchQueries = async (queryList, seenUrls, usedUrls, maxPerQuery = 5) => {
-        const videos = [];
-        for (const q of queryList) {
-            if (!q) continue;
-            logToUI(`Searching: "${q}"`);
-
-            try {
-                const searchPromise = vioryDownloader.searchVideos(q, maxPerQuery);
-                const timeoutPromise = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('Search Timeout')), 60000)
-                );
-
-                const results = await Promise.race([searchPromise, timeoutPromise]);
-
-                if (results && results.length > 0) {
-                    let addedCount = 0;
-                    for (const video of results) {
-                        if (!seenUrls.has(video.url) && !usedUrls.has(video.url)) {
-                            seenUrls.add(video.url);
-                            video.sourceQuery = q;
-                            videos.push(video);
-                            addedCount++;
+        // Use the new intelligent search and download method
+        const result = await vioryDownloader.intelligentSearchAndDownload(
+            headline,
+            text,
+            geminiApiKey,
+            {
+                myContentWaitMinutes: 4,
+                maxCandidatesToTry: 5,
+                onProgress: (progress) => {
+                    // Send progress to UI
+                    const stage = progress.stage;
+                    const message = progress.message || '';
+                    
+                    // Format log based on stage (can be number 1-6 or string)
+                    if (typeof stage === 'number') {
+                        // Stages from intelligentSearch: 1=AI, 2=Search, 3=Analysis, 4=Scoring, 5=Vision, 6=Ranking
+                        switch (stage) {
+                            case 1:
+                                logToUI(`[AI] ${message}`);
+                                break;
+                            case 2:
+                                logToUI(`[Search] ${message}`);
+                                break;
+                            case 3:
+                                logToUI(`[Deep Analysis] ${message}`);
+                                break;
+                            case 4:
+                                logToUI(`[Text Scoring] ${message}`);
+                                break;
+                            case 5:
+                                // Visual validation - show detailed info
+                                if (progress.recommendation) {
+                                    const icon = progress.recommendation === 'ACCEPT' ? '✓' : 
+                                                 progress.recommendation === 'REJECT' ? '✗' : '?';
+                                    logToUI(`[Vision] ${icon} ${message}`);
+                                } else {
+                                    logToUI(`[Vision] ${message}`);
+                                }
+                                break;
+                            case 6:
+                                logToUI(`[Final Ranking] ${message}`);
+                                break;
+                            default:
+                                logToUI(`[Stage ${stage}] ${message}`);
                         }
+                    } else if (stage === 'search') {
+                        logToUI(`[Search] ${message}`);
+                    } else if (stage === 'download') {
+                        logToUI(`[Download] ${message}`);
+                    } else if (stage === 'myContent') {
+                        logToUI(`[My Content] ${message}`);
+                    } else if (message) {
+                        logToUI(`[${stage || 'Info'}] ${message}`);
                     }
-                    logToUI(`Found ${results.length} videos for "${q}" (+${addedCount} new)`);
                 }
-            } catch (searchErr) {
-                logToUI(`Search error for "${q}": ${searchErr.message}`);
             }
+        );
 
-            // OPTIMIZED: Reduced from 250ms to 100ms between queries
-            // ORIGINAL: await new Promise(r => setTimeout(r, 250));
-            await new Promise(r => setTimeout(r, 100));
+        if (!result.success) {
+            // Log skipped videos if any
+            if (result.skippedVideos && result.skippedVideos.length > 0) {
+                logToUI(`[Warning] Skipped ${result.skippedVideos.length} videos:`);
+                result.skippedVideos.forEach((v, i) => {
+                    logToUI(`  ${i + 1}. "${(v.title || '').substring(0, 40)}..." - ${v.reason}`);
+                });
+            }
+            throw new Error(result.error || 'Intelligent search failed');
         }
-        return videos;
-    };
 
-    // Helper function to score and get best video
-    const scoreAndGetBest = (videos) => {
-        const scored = videos.map(video => ({
-            ...video,
-            relevanceScore: video.relevanceScore || calculateVideoRelevance(video, analysis, video.sourceQuery)
-        }));
-        scored.sort((a, b) => b.relevanceScore - a.relevanceScore);
-        return scored;
-    };
+        // Success! Extract video info
+        primaryVideo = result.video;
+        let currentPath = result.path;
 
-    // RETRY LOOP WITH GRANULAR 3-TIER SEARCH
-    while (attempts < 5 && !success) {
-        attempts++;
-        try {
-            logToUI(`[Retry System] Segment ${segment.index + 1}: Attempt ${attempts}/5`);
+        logToUI(`✅ Found video: "${(primaryVideo.title || '').substring(0, 50)}..."`);
+        logToUI(`   Score: ${primaryVideo.finalScore} (Text: ${primaryVideo.textScore}, Visual: ${primaryVideo.visualScore ?? 'N/A'})`);
+        if (primaryVideo.mandatoryCredit) {
+            logToUI(`   Credit: ${primaryVideo.mandatoryCredit}`);
+        }
+        if (result.candidateNumber > 1) {
+            logToUI(`   Note: Used candidate #${result.candidateNumber} (previous candidates skipped)`);
+        }
 
-            let allVideos = [];
-            const seenUrls = new Set();
-            let selectedVideo = null;
+        // Check duration and merge if needed
+        if (!videoEditorService) await loadServices();
+        let duration = await videoEditorService.getMediaDuration(currentPath);
+        const requiredDuration = (segment.duration || 5) * 0.85; // 85% rule
 
-            // ========== TIER 1: Most Specific Queries (2 queries) ==========
-            logToUI(`[Tier 1] Searching ${tier1Queries.length} most specific queries...`);
-            const tier1Videos = await searchQueries(tier1Queries, seenUrls, usedVideoUrls, 5);
-            allVideos = [...tier1Videos];
+        if (duration < requiredDuration) {
+            logToUI(`⚠️ Video too short (${duration.toFixed(1)}s vs required ${segment.duration}s). Merging...`);
 
-            if (allVideos.length > 0) {
-                // Score Tier 1 results immediately
-                const scored = scoreAndGetBest(allVideos);
-                const topScore = scored[0].relevanceScore;
-                const topVideo = scored[0];
+            const clipsToMerge = [currentPath];
+            let accumulatedDuration = duration;
 
-                logToUI(`[Tier 1] Best score: ${topScore} - "${(topVideo.title || '').substring(0, 50)}"`);
+            // Use remaining videos from search results for merging
+            const remainingVideos = (result.searchResults?.videos || [])
+                .filter(v => v.url !== primaryVideo.url)
+                .slice(0, 4);
 
-                // Check for confident match (Score ≥ 80)
-                if (isConfidentMatch(topVideo, analysis, topScore)) {
-                    logToUI(`[Tier 1] ✓ Confident match! Using this video.`);
-                    selectedVideo = topVideo;
-                    allVideos = scored; // Keep all scored for potential merge
-                }
-                // Score 60-79: Search 1-2 more queries (Tier 2)
-                else if (topScore >= 60) {
-                    logToUI(`[Tier 2] Score ${topScore} is decent. Searching ${tier2Queries.length} more queries...`);
-                    const tier2Videos = await searchQueries(tier2Queries, seenUrls, usedVideoUrls, 4);
-                    allVideos = [...allVideos, ...tier2Videos];
+            let extraVideoIndex = 0;
 
-                    // Re-score with new videos
-                    const rescored = scoreAndGetBest(allVideos);
-                    const newTopScore = rescored[0].relevanceScore;
-                    const newTopVideo = rescored[0];
+            while (accumulatedDuration < (segment.duration + VIDEO_MIN_MARGIN) && clipsToMerge.length < 5) {
+                let extraVideo = remainingVideos[extraVideoIndex++];
 
-                    logToUI(`[Tier 2] New best score: ${newTopScore} - "${(newTopVideo.title || '').substring(0, 50)}"`);
-
-                    // Check if we improved or have confident match now
-                    if (isConfidentMatch(newTopVideo, analysis, newTopScore) || newTopScore >= 70) {
-                        logToUI(`[Tier 2] ✓ Good match found! Using this video.`);
-                        selectedVideo = newTopVideo;
-                        allVideos = rescored;
+                if (!extraVideo) {
+                    logToUI(`Not enough unique videos, duplicating clip...`);
+                    clipsToMerge.push(currentPath);
+                    accumulatedDuration += duration;
+                } else {
+                    logToUI(`Fetching extra clip: ${(extraVideo.title || '').substring(0, 40)}...`);
+                    // Use skipMyContent for extra clips to avoid long waits
+                    const extraDl = await vioryDownloader.downloadVideo(extraVideo.url, null, { skipMyContent: true });
+                    if (extraDl.success) {
+                        clipsToMerge.push(extraDl.path);
+                        const extraDur = await videoEditorService.getMediaDuration(extraDl.path);
+                        accumulatedDuration += extraDur;
+                        logToUI(`   Added ${extraDur.toFixed(1)}s clip`);
+                    } else if (extraDl.needsMyContent) {
+                        logToUI(`   Skipped (requires My Content)`);
                     }
                 }
             }
 
-            // ========== TIER 3: Generic Queries (only if still no good match) ==========
-            if (!selectedVideo && tier3Queries.length > 0) {
-                logToUI(`[Tier 3] No confident match yet. Searching ${tier3Queries.length} generic queries...`);
-                const tier3Videos = await searchQueries(tier3Queries, seenUrls, usedVideoUrls, 3);
-                allVideos = [...allVideos, ...tier3Videos];
-            }
+            // Merge clips
+            const mergedPath = path.join(app.getPath('userData'), 'video-downloads', `merged_${Date.now()}_${segment.index}.mp4`);
+            await videoEditorService.mergeVideos(clipsToMerge, mergedPath);
 
-            if (allVideos.length === 0) {
-                throw new Error("No videos found after trying all queries.");
-            }
+            currentPath = mergedPath;
+            duration = accumulatedDuration;
+            logToUI(`✅ Merged ${clipsToMerge.length} clips. Final duration: ${duration.toFixed(1)}s`);
 
-            // ========== FINAL SCORING & SELECTION ==========
-            let scoredVideos = scoreAndGetBest(allVideos);
-            primaryVideo = selectedVideo || scoredVideos[0];
+            if (mainWindow) mainWindow.webContents.send('show-toast', {
+                type: 'info',
+                title: 'Auto-Fix',
+                message: `Combined ${clipsToMerge.length} clips for Segment ${segment.index + 1}`
+            });
+        }
 
-            // Log top candidates
-            logToUI(`[Scoring] Final ranking of ${scoredVideos.length} videos:`);
-            scoredVideos.slice(0, 3).forEach((v, i) => {
-                const marker = v === primaryVideo ? '→' : ' ';
-                logToUI(`${marker} ${i + 1}. Score: ${v.relevanceScore} - "${(v.title || '').substring(0, 50)}"`);
+        // Exact Trimming
+        const trimmedPath = path.join(app.getPath('userData'), 'video-downloads', `segment_${segment.index}_exact_${Date.now()}.mp4`);
+
+        try {
+            logToUI(`✂️ Trimming to exact duration: ${segment.duration}s`);
+            await videoEditorService.trimAndPrepareClip(currentPath, trimmedPath, {
+                duration: segment.duration,
+                startOffset: 0,
+                volume: 0,
+                fadeIn: 0.2,
+                fadeOut: 0.2,
+                headline: segment.headline || segment.title || ''
             });
 
-            usedVideoUrls.add(primaryVideo.url);
-            const remainingVideos = scoredVideos.filter(v => v.url !== primaryVideo.url);
-
-            logToUI(`Downloading candidate: ${primaryVideo.title}`);
-            const dlResult = await vioryDownloader.downloadVideo(primaryVideo.url);
-
-            if (!dlResult.success) throw new Error("Download failed");
-
-            let currentPath = dlResult.path;
-
-            // 3. Duration Check
-            if (!videoEditorService) await loadServices();
-            let duration = await videoEditorService.getMediaDuration(currentPath);
-
-            const requiredDuration = (segment.duration || 5) * 0.85; // 85% rule
-
-            if (duration < requiredDuration) {
-                logToUI(`⚠️ Video too short (${duration.toFixed(1)}s vs required ${segment.duration}s). merging...`);
-
-                const clipsToMerge = [currentPath];
-                let accumulatedDuration = duration;
-
-                // Fetch more videos until satisfied
-                // Use remaining scored videos
-                let extraVideoIndex = 0;
-
-                while (accumulatedDuration < (segment.duration + VIDEO_MIN_MARGIN) && clipsToMerge.length < 5) {
-                    let extraVideo = remainingVideos[extraVideoIndex++];
-
-                    // If run out of search results, perform new search?
-                    // For simplicity, just use what we have or duplicate
-                    if (!extraVideo) {
-                        // Fallback: search again with simpler query or replicate
-                        logToUI(`Not enough unique videos, duplicating clip...`);
-                        clipsToMerge.push(currentPath);
-                        accumulatedDuration += duration;
-                    } else {
-                        logToUI(`Fetching extra clip: ${extraVideo.title}`);
-                        const extraDl = await vioryDownloader.downloadVideo(extraVideo.url);
-                        if (extraDl.success) {
-                            clipsToMerge.push(extraDl.path);
-                            const extraDur = await videoEditorService.getMediaDuration(extraDl.path);
-                            accumulatedDuration += extraDur;
-                            usedVideoUrls.add(extraVideo.url);
-                        }
-                    }
-                }
-
-                // Merge
-                const mergedPath = path.join(app.getPath('userData'), 'video-downloads', `merged_${Date.now()}_${segment.index}.mp4`);
-                await videoEditorService.mergeVideos(clipsToMerge, mergedPath);
-
-                currentPath = mergedPath;
-                duration = accumulatedDuration;
-                logToUI(`✅ Merged ${clipsToMerge.length} clips. Final duration: ${duration.toFixed(1)}s`);
-
-                // UI Feedback Toast? IPC
-                if (mainWindow) mainWindow.webContents.send('show-toast', {
-                    type: 'info',
-                    title: 'Auto-Fix',
-                    message: `Combined ${clipsToMerge.length} clips for Segment ${segment.index + 1}`
-                });
-            }
-
-            // 4. Exact Trimming (New Logic)
-            // Ensure the video is exactly the segment duration (looping if needed via videoEditor)
-            const trimmedPath = path.join(app.getPath('userData'), 'video-downloads', `segment_${segment.index}_exact_${Date.now()}.mp4`);
-
-            try {
-                logToUI(`✂️ Trimming/Looping to exact duration: ${segment.duration}s`);
-                await videoEditorService.trimAndPrepareClip(currentPath, trimmedPath, {
-                    duration: segment.duration,
-                    startOffset: 0,
-                    volume: 0, // Mute B-roll by default for cleaner result
-                    fadeIn: 0.2, // Small fade for polish
-                    fadeOut: 0.2,
-                    headline: segment.headline || segment.title || '' // For lower third overlay
-                });
-
-                finalVideoPath = trimmedPath;
-                finalDuration = segment.duration;
-            } catch (err) {
-                console.error("[Process] Trim failed, using raw video:", err);
-                // Fallback to raw video if trim fails
-                finalVideoPath = currentPath;
-                finalDuration = duration;
-            }
-
-            success = true;
-
-        } catch (e) {
-            logToUI(`❌ Attempt ${attempts} failed: ${e.message}`);
-            // Backoff wait
-            if (attempts < 5) {
-                const wait = RETRY_DELAYS[attempts - 1];
-                logToUI(`Waiting ${wait / 1000}s before retry...`);
-                await new Promise(r => setTimeout(r, wait));
-            }
+            finalVideoPath = trimmedPath;
+            finalDuration = segment.duration;
+        } catch (err) {
+            console.error("[Process] Trim failed, using raw video:", err);
+            finalVideoPath = currentPath;
+            finalDuration = duration;
         }
-    }
 
-    if (!success) {
-        throw new Error("Failed to process segment after 5 attempts.");
+    } catch (error) {
+        logToUI(`❌ Error: ${error.message}`);
+        throw error;
     }
 
     // Success - Update Segment
     const fileUrl = pathToFileURL(finalVideoPath).href;
     const extractedCredit = primaryVideo ? (primaryVideo.mandatoryCredit || '') : '';
-    console.log(`[Process] Segment ${segment.index + 1} - MandatoryCredit from video: "${extractedCredit}"`);
+    console.log(`[Process] Segment ${segment.index + 1} - MandatoryCredit: "${extractedCredit}"`);
 
     segment.video = {
         url: fileUrl,
         previewUrl: fileUrl,
-        thumbnail: '', // Optional
+        thumbnail: '',
         duration: finalDuration,
         title: primaryVideo ? primaryVideo.title : 'Auto-Matched Video',
         mandatoryCredit: extractedCredit
     };
-    // Also store mandatoryCredit at segment level for easy access
     segment.mandatoryCredit = segment.video.mandatoryCredit;
-    
-    // FIND DIFFERENT FIX: Store the original Viory URL for exclusion in future "Find Different" calls
-    // This allows us to track which videos have been used/rejected for this segment
     segment._sourceVideoUrl = primaryVideo ? primaryVideo.url : null;
-    
     segment.status = 'found';
+
+    logToUI(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 }
 
 ipcMain.handle('smart-fetch-timeline', async (event, { blocks, scriptText }) => {
@@ -2471,6 +2397,225 @@ ipcMain.handle('smart-update-clip-option', (event, { index, prop, value }) => {
         return true;
     }
     return false;
+});
+
+// ============ PRE-RENDER OVERLAYS IN BACKGROUND ============
+// This allows rendering lower thirds and mandatory credits while user works
+// Speeds up final export significantly
+// Uses OverlayPreRenderService for queue management and prioritization
+
+let overlayPreRenderService = null;
+
+async function getOverlayPreRenderService() {
+    if (!overlayPreRenderService) {
+        try {
+            const module = await import('../services/overlayPreRenderService.js');
+            overlayPreRenderService = module.default;
+            await overlayPreRenderService.initialize();
+            console.log('[PreRender] OverlayPreRenderService initialized');
+        } catch (e) {
+            console.error('[PreRender] Failed to initialize OverlayPreRenderService:', e.message);
+            return null;
+        }
+    }
+    return overlayPreRenderService;
+}
+
+ipcMain.handle('prerender-overlay', async (event, { type, data }) => {
+    try {
+        const service = await getOverlayPreRenderService();
+        
+        if (service) {
+            if (type === 'lowerthird' && data.headline) {
+                const task = service.enqueueLowerThird({
+                    headline: data.headline,
+                    segmentId: data.segmentId || 0,
+                    durationInSeconds: data.duration || 5,
+                    priority: data.priority || 3 // LOW priority by default
+                });
+                return { queued: true, type: 'lowerthird', taskId: task?.id };
+            }
+            
+            if (type === 'mandatory' && data.text) {
+                const task = service.enqueueMandatoryCredit({
+                    text: data.text,
+                    segmentId: data.segmentId || 0,
+                    durationInSeconds: data.duration || 5,
+                    priority: data.priority || 3
+                });
+                return { queued: true, type: 'mandatory', taskId: task?.id };
+            }
+        } else {
+            // Fallback to direct renderer call if service unavailable
+            if (type === 'lowerthird' && data.headline) {
+                const lowerThirdRenderer = (await import('../services/lowerThirdRenderer.js')).default;
+                lowerThirdRenderer.preRender({
+                    headline: data.headline,
+                    segmentId: data.segmentId || 0,
+                    durationInSeconds: data.duration || 5
+                }).catch(e => console.log('[PreRender] LowerThird background render:', e.message));
+                return { queued: true, type: 'lowerthird' };
+            }
+            
+            if (type === 'mandatory' && data.text) {
+                const mandatoryCreditRenderer = (await import('../services/mandatoryCreditRenderer.js')).default;
+                mandatoryCreditRenderer.preRender({
+                    text: data.text,
+                    segmentId: data.segmentId || 0,
+                    durationInSeconds: data.duration || 5
+                }).catch(e => console.log('[PreRender] MandatoryCredit background render:', e.message));
+                return { queued: true, type: 'mandatory' };
+            }
+        }
+        
+        return { queued: false, error: 'Unknown type or missing data' };
+    } catch (e) {
+        console.error('[PreRender] Error:', e.message);
+        return { queued: false, error: e.message };
+    }
+});
+
+// Pre-render multiple overlays at once (batch) with priority queue
+ipcMain.handle('prerender-overlays-batch', async (event, segments) => {
+    if (!Array.isArray(segments)) return { queued: 0 };
+    
+    try {
+        const service = await getOverlayPreRenderService();
+        
+        if (service) {
+            // Use service's batch method for optimal scheduling
+            const tasks = service.preRenderSegments(segments, 3); // LOW priority
+            console.log(`[PreRender] Queued ${tasks.length} overlays for background rendering`);
+            return { queued: tasks.length, total: segments.length };
+        } else {
+            // Fallback to direct renderer calls
+            let queued = 0;
+            const lowerThirdRenderer = (await import('../services/lowerThirdRenderer.js')).default;
+            const mandatoryCreditRenderer = (await import('../services/mandatoryCreditRenderer.js')).default;
+            
+            for (let i = 0; i < segments.length; i++) {
+                const seg = segments[i];
+                
+                if (seg.headline || seg.title) {
+                    lowerThirdRenderer.preRender({
+                        headline: seg.headline || seg.title,
+                        segmentId: i,
+                        durationInSeconds: 5
+                    }).catch(() => {});
+                    queued++;
+                }
+                
+                if (seg.mandatoryCredit) {
+                    mandatoryCreditRenderer.preRender({
+                        text: seg.mandatoryCredit,
+                        segmentId: i,
+                        durationInSeconds: 5
+                    }).catch(() => {});
+                    queued++;
+                }
+            }
+            
+            console.log(`[PreRender] Queued ${queued} overlays for background rendering (fallback mode)`);
+            return { queued, total: segments.length };
+        }
+    } catch (e) {
+        console.error('[PreRender] Batch error:', e.message);
+        return { queued: 0, error: e.message };
+    }
+});
+
+// Prioritize a segment (when user selects it in editor)
+ipcMain.handle('prerender-prioritize-segment', async (event, segmentId) => {
+    try {
+        const service = await getOverlayPreRenderService();
+        if (service) {
+            service.prioritizeSegment(segmentId);
+            return { success: true };
+        }
+        return { success: false, error: 'Service not available' };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
+});
+
+// Handle text change with debounce (from editor)
+ipcMain.handle('prerender-text-change', async (event, { type, content, segmentId, durationInSeconds }) => {
+    try {
+        const service = await getOverlayPreRenderService();
+        if (service) {
+            service.onTextChange({ type, content, segmentId, durationInSeconds });
+            return { success: true };
+        }
+        return { success: false, error: 'Service not available' };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
+});
+
+// Get cache statistics (enhanced with queue info)
+ipcMain.handle('get-overlay-cache-stats', async () => {
+    try {
+        const service = await getOverlayPreRenderService();
+        
+        if (service) {
+            return {
+                service: service.getStats(),
+                queue: service.getQueueStatus()
+            };
+        }
+        
+        // Fallback
+        const lowerThirdRenderer = (await import('../services/lowerThirdRenderer.js')).default;
+        const mandatoryCreditRenderer = (await import('../services/mandatoryCreditRenderer.js')).default;
+        
+        return {
+            lowerThirds: lowerThirdRenderer.getCacheStats(),
+            mandatoryCredits: mandatoryCreditRenderer.getCacheStats()
+        };
+    } catch (e) {
+        return { error: e.message };
+    }
+});
+
+// Pause/Resume pre-rendering (useful during export)
+ipcMain.handle('prerender-pause', async () => {
+    try {
+        const service = await getOverlayPreRenderService();
+        if (service) {
+            service.pause();
+            return { success: true };
+        }
+        return { success: false };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
+});
+
+ipcMain.handle('prerender-resume', async () => {
+    try {
+        const service = await getOverlayPreRenderService();
+        if (service) {
+            service.resume();
+            return { success: true };
+        }
+        return { success: false };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
+});
+
+// Clear pre-render cache
+ipcMain.handle('prerender-clear-cache', async () => {
+    try {
+        const service = await getOverlayPreRenderService();
+        if (service) {
+            service.clearCache();
+            return { success: true };
+        }
+        return { success: false };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
 });
 
 // --- RECOVERY LOGIC (Persistent JSON) ---

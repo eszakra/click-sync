@@ -10,8 +10,8 @@ import config from '../../config.js';
 // Default API Key (fallback) - also available in config.js
 const DEFAULT_KEY = config?.gemini?.apiKey || "AIzaSyC0QCO0_h3jb6l2rDV738Rv8hAvf6_5atk";
 
-// Model to use - gemini-2.0-flash has vision support and is fast
-const DEFAULT_MODEL = config?.gemini?.model || "gemini-2.0-flash";
+// Model to use - gemini-2.5-flash has vision support and is fast
+const DEFAULT_MODEL = config?.gemini?.model || "gemini-2.5-flash";
 
 // Rate limiting configuration
 const RATE_LIMIT = {

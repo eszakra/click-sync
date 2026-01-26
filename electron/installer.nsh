@@ -28,3 +28,23 @@ VIAddVersionKey "ProductName" "ClickSync Studio"
 VIAddVersionKey "CompanyName" "ClickSync"
 VIAddVersionKey "LegalCopyright" "© 2025 ClickSync"
 VIAddVersionKey "FileDescription" "AI-Powered Video Studio"
+
+; Grant full permissions to installation directory after install
+; This allows Remotion and other components to create cache folders
+!macro customInstall
+  ; Create .remotion folder preemptively
+  CreateDirectory "$INSTDIR\.remotion"
+  
+  ; Use icacls to grant full control to Users group for the installation directory
+  ; This fixes EPERM errors when Remotion tries to create .remotion folder in Program Files
+  ; /grant gives permissions, (OI) = object inherit, (CI) = container inherit, F = full control
+  ; /T applies recursively to existing files
+  ; S-1-5-32-545 = Users group, S-1-5-11 = Authenticated Users
+  nsExec::ExecToStack 'cmd /c icacls "$INSTDIR" /grant *S-1-5-32-545:(OI)(CI)F /T /Q'
+  Pop $0
+  Pop $1
+  
+  nsExec::ExecToStack 'cmd /c icacls "$INSTDIR" /grant *S-1-5-11:(OI)(CI)F /T /Q'
+  Pop $0
+  Pop $1
+!macroend
