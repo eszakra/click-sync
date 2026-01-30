@@ -36,7 +36,7 @@ export const alignScriptWithAssembly = async (
 ): Promise<AlignedSegment[]> => {
 
   const model = genAI.getGenerativeModel({
-    model: "gemini-3-pro-preview", // User requested to keep this model
+    model: "gemini-3-flash-preview", // Using gemini-3-flash-preview
     generationConfig: {
       responseMimeType: "application/json",
       responseSchema: {

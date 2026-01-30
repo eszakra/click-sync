@@ -8,12 +8,6 @@ const fs = require('fs');
 const { app } = require('electron');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-// Priority keywords for smart video matching
-const PRIORITY_KEYWORDS = ['speech', 'address', 'statement', 'interview', 'remarks', 'talking', 'speaks', 'announces'];
-
-// Screenshot cache to avoid re-capturing
-const screenshotCache = new Map();
-
 class VioryDownloader {
     constructor() {
         this.browser = null;
@@ -22,6 +16,10 @@ class VioryDownloader {
         this.cookiesPath = null;
         this.downloadsPath = null;
         this.isHeadless = false;
+        // Anti-repeat tracking: stores URLs of recently used videos
+        // Videos cannot repeat within REPEAT_WINDOW segments
+        this.recentlyUsedVideos = [];
+        this.REPEAT_WINDOW = 6; // Videos can repeat after 6 segments
     }
 
     /**
@@ -68,8 +66,8 @@ class VioryDownloader {
             channel: executablePath ? undefined : 'chromium',
             executablePath: executablePath,
             args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--start-minimized',
                 // RAM optimization flags
@@ -122,14 +120,450 @@ class VioryDownloader {
     }
 
     /**
-     * Ensure page is available
+     * Ensure page is available - with robust browser recovery
      */
     async ensurePage() {
-        if (!this.page || this.page.isClosed()) {
-            console.log('[VioryDownloader] Page missing, re-initializing...');
+        try {
+            // Check if browser is still connected
+            if (!this.browser || !this.browser.isConnected()) {
+                console.log('[VioryDownloader] Browser disconnected, re-initializing...');
+                await this.init({ headless: this.isHeadless });
+                return this.page;
+            }
+
+            // Check if page is closed
+            if (!this.page || this.page.isClosed()) {
+                console.log('[VioryDownloader] Page closed, creating new page...');
+                this.page = await this.context.newPage();
+                // Apply cookies again
+                await this.loadCookies();
+            }
+
+            return this.page;
+        } catch (error) {
+            console.error('[VioryDownloader] ensurePage error, full re-init:', error.message);
+            // Full re-initialization
+            this.browser = null;
+            this.context = null;
+            this.page = null;
             await this.init({ headless: this.isHeadless });
+            return this.page;
         }
-        return this.page;
+    }
+
+    /**
+     * Select best video from ranked list, avoiding recently used videos
+     * If top choice was used recently, selects next best alternative
+     * @param {Array} rankedVideos - Videos sorted by score (best first)
+     * @returns {Object} Selected video (best available that wasn't recently used)
+     */
+    selectBestVideoAvoidingRepeats(rankedVideos) {
+        if (!rankedVideos || rankedVideos.length === 0) return null;
+
+        // Find first video not in recently used list
+        for (let i = 0; i < rankedVideos.length; i++) {
+            const video = rankedVideos[i];
+            if (!this.recentlyUsedVideos.includes(video.url)) {
+                if (i > 0) {
+                    console.log(`   [ANTI-REPEAT] Skipped ${i} recently used video(s), selected alternative`);
+                }
+                return video;
+            }
+        }
+
+        // All videos were recently used - allow repeat but log it
+        console.log(`   [ANTI-REPEAT] All ${rankedVideos.length} candidates were recently used, allowing repeat`);
+        return rankedVideos[0];
+    }
+
+    /**
+     * Mark a video as used and maintain the sliding window
+     * @param {string} videoUrl - URL of the video that was selected
+     */
+    markVideoAsUsed(videoUrl) {
+        if (!videoUrl) return;
+
+        // Add to recently used list
+        this.recentlyUsedVideos.push(videoUrl);
+
+        // Maintain sliding window - remove oldest if exceeded
+        while (this.recentlyUsedVideos.length > this.REPEAT_WINDOW) {
+            this.recentlyUsedVideos.shift();
+        }
+
+        console.log(`   [ANTI-REPEAT] Tracked ${this.recentlyUsedVideos.length}/${this.REPEAT_WINDOW} recent videos`);
+    }
+
+    /**
+     * Generate expanded/broader search queries when initial queries return no results
+     * This implements query expansion for better robustness
+     * @param {object} analysis - The original Gemini analysis
+     * @param {string} headline - Segment headline
+     * @param {string} text - Segment text
+     * @returns {array} Array of expanded query strings
+     */
+    generateExpansionQueries(analysis, headline, text) {
+        const queries = [];
+        const country = analysis?.country || '';
+        const mainSubject = analysis?.main_subject || '';
+        const keyVisuals = analysis?.key_visuals || [];
+        
+        // Extract keywords from headline and text
+        const allText = `${headline} ${text}`.toLowerCase();
+        const words = allText.split(/\s+/).filter(w => w.length > 3);
+        const uniqueWords = [...new Set(words)].slice(0, 10);
+        
+        // Strategy 1: Broader country + topic combinations
+        if (country) {
+            queries.push(`${country} news footage`);
+            queries.push(`${country} military`);
+            queries.push(`${country} defense`);
+            queries.push(`${country} armed forces`);
+        }
+        
+        // Strategy 2: Generic military/defense terms with country
+        if (allText.includes('military') || allText.includes('army') || allText.includes('defense')) {
+            if (country) {
+                queries.push(`${country} troops`);
+                queries.push(`${country} soldiers`);
+                queries.push(`${country} weapons`);
+            }
+        }
+        
+        // Strategy 3: Aircraft/Aviation specific
+        if (allText.includes('aircraft') || allText.includes('jet') || allText.includes('plane') || allText.includes('air force')) {
+            if (country) {
+                queries.push(`${country} aircraft`);
+                queries.push(`${country} air force`);
+                queries.push(`${country} fighter jet`);
+            }
+            queries.push('military aircraft');
+            queries.push('fighter jet footage');
+        }
+        
+        // Strategy 4: Naval/Maritime specific
+        if (allText.includes('ship') || allText.includes('naval') || allText.includes('navy') || allText.includes('carrier')) {
+            if (country) {
+                queries.push(`${country} navy`);
+                queries.push(`${country} warship`);
+                queries.push(`${country} naval`);
+            }
+            queries.push('warship footage');
+            queries.push('naval footage');
+        }
+        
+        // Strategy 5: Use key visual elements
+        if (keyVisuals && keyVisuals.length > 0) {
+            for (const visual of keyVisuals.slice(0, 3)) {
+                if (country) {
+                    queries.push(`${country} ${visual}`);
+                }
+                queries.push(`${visual} footage`);
+            }
+        }
+        
+        // Strategy 6: Important keywords from text
+        const importantKeywords = uniqueWords.filter(w => 
+            !['this', 'that', 'with', 'from', 'have', 'been', 'were', 'said'].includes(w)
+        );
+        
+        for (let i = 0; i < Math.min(importantKeywords.length, 3); i++) {
+            const keyword = importantKeywords[i];
+            if (country) {
+                queries.push(`${country} ${keyword}`);
+            }
+            queries.push(`${keyword} news`);
+        }
+        
+        // Strategy 7: Generic fallbacks based on topic
+        if (allText.includes('war') || allText.includes('conflict') || allText.includes('attack')) {
+            queries.push('military conflict footage');
+            queries.push('war footage');
+        }
+        
+        if (allText.includes('drill') || allText.includes('exercise') || allText.includes('training')) {
+            queries.push('military exercise');
+            queries.push('military drill');
+        }
+        
+        if (allText.includes('meeting') || allText.includes('summit') || allText.includes('talks')) {
+            queries.push('diplomatic meeting');
+            queries.push('international summit');
+        }
+        
+        // Strategy 8: Ultra-generic final fallbacks
+        queries.push('military footage');
+        queries.push('defense news');
+        if (country) {
+            queries.push(`${country} footage`);
+        }
+        
+        // Remove duplicates and limit to 12 queries
+        const uniqueQueries = [...new Set(queries)].slice(0, 12);
+        
+        console.log(`[Expansion] Generated ${uniqueQueries.length} expanded queries:`, uniqueQueries);
+        return uniqueQueries;
+    }
+
+    /**
+     * Download a video on an ISOLATED page (for manual URL downloads)
+     * This creates a separate page so it doesn't interfere with ongoing segment downloads
+     * @param {string} videoUrl - The Viory video URL
+     * @param {function} onProgress - Progress callback
+     * @returns {object} Download result
+     */
+    async downloadVideoIsolated(videoUrl, onProgress) {
+        console.log(`[VioryDownloader] ISOLATED download for: ${videoUrl}`);
+
+        // Create isolated page from same context (shares cookies/login)
+        let isolatedPage = null;
+        try {
+            isolatedPage = await this.context.newPage();
+            console.log('[VioryDownloader] Created isolated page for manual download');
+
+            // Extract Video ID
+            const videoId = this.extractVideoId(videoUrl);
+            console.log(`[VioryDownloader] Video ID: ${videoId}`);
+
+            let videoTitle = '';
+            let earlyMandatoryCredit = '';
+
+            // Navigate to video page
+            await isolatedPage.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+            await isolatedPage.waitForSelector('button', { timeout: 5000 }).catch(() => { });
+            await isolatedPage.waitForTimeout(800);
+
+            // Dismiss popups on isolated page
+            await isolatedPage.evaluate(() => {
+                document.querySelectorAll('button').forEach(btn => {
+                    const text = btn.textContent || '';
+                    if (text === '×' || text === 'x' || text === 'X') btn.click();
+                });
+                document.querySelectorAll('.popup-close, [aria-label="Close"], .modal-close').forEach(el => el.click());
+            });
+            await isolatedPage.waitForTimeout(300);
+
+            // Extract video title
+            videoTitle = await isolatedPage.evaluate(() => {
+                const h1 = document.querySelector('h1');
+                return h1 ? h1.innerText.trim() : '';
+            });
+            console.log(`[VioryDownloader] Video title: "${videoTitle.substring(0, 50)}..."`);
+
+            // Extract mandatory credit early
+            try {
+                earlyMandatoryCredit = await isolatedPage.evaluate(() => {
+                    const bodyText = document.body.innerText || '';
+                    const creditMatch = bodyText.match(/[Mm]andatory\s*credit[:\s]+([^\n]+)/);
+                    if (creditMatch && creditMatch[1]) {
+                        let credit = creditMatch[1].trim();
+                        credit = credit.replace(/[;].*$/, '').trim();
+                        credit = credit.replace(/\/[A-Z].*$/i, '').trim();
+                        credit = credit.replace(/\s*\/-.*$/, '').trim();
+                        credit = credit.replace(/\s*\/\s*-.*$/, '').trim();
+                        credit = credit.replace(/\s+-\s+.*$/, '').trim();
+                        credit = credit.replace(/[.,;:\/]+$/, '').trim();
+                        if (credit.length >= 3 && credit.length <= 100) {
+                            return credit;
+                        }
+                    }
+                    return '';
+                });
+                if (earlyMandatoryCredit) {
+                    console.log(`[VioryDownloader] ✅ Early extracted mandatoryCredit: "${earlyMandatoryCredit}"`);
+                }
+            } catch (e) {
+                console.log(`[VioryDownloader] Could not extract early credit: ${e.message}`);
+            }
+
+            // Scroll and click Download button
+            await isolatedPage.evaluate(() => window.scrollBy(0, 300));
+            await isolatedPage.waitForTimeout(200);
+
+            console.log('[VioryDownloader] Clicking Download button to open modal...');
+            const openedModal = await isolatedPage.evaluate(() => {
+                const btns = Array.from(document.querySelectorAll('button'));
+                const dlBtn = btns.find(b => {
+                    const text = b.textContent || '';
+                    return text.includes('Download') &&
+                        !text.includes('MP4') &&
+                        !text.includes('720') &&
+                        !text.includes('360');
+                });
+                if (dlBtn) {
+                    dlBtn.click();
+                    return true;
+                }
+                return false;
+            });
+
+            if (!openedModal) {
+                throw new Error('Could not find Download button');
+            }
+
+            await isolatedPage.waitForTimeout(1000);
+
+            // Wait for modal
+            try {
+                await isolatedPage.waitForSelector('input[type="checkbox"]', { timeout: 5000 });
+            } catch (e) {
+                console.log('[VioryDownloader] No checkbox found, trying direct download...');
+            }
+
+            // Handle restrictions checkbox
+            console.log('[VioryDownloader] Handling restrictions checkbox...');
+            await isolatedPage.evaluate(() => {
+                const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+                checkboxes.forEach(cb => {
+                    if (!cb.checked) cb.click();
+                });
+            });
+            await isolatedPage.waitForTimeout(250);
+
+            // Set up download listener
+            const downloadPromise = isolatedPage.waitForEvent('download', { timeout: 15000 }).catch(() => null);
+
+            // Click submit button
+            console.log('[VioryDownloader] Clicking modal submit button...');
+            await isolatedPage.evaluate(() => {
+                const modal = document.querySelector('[role="dialog"], .modal, [class*="modal"], [class*="Modal"]') || document.body;
+                const btns = Array.from(modal.querySelectorAll('button'));
+
+                let submitBtn = btns.find(b => {
+                    const text = (b.textContent || '').toLowerCase();
+                    return (text.includes('download') || text.includes('confirm') || text.includes('submit')) && !b.disabled;
+                });
+
+                if (!submitBtn) {
+                    submitBtn = btns.find(b => {
+                        const classes = b.className || '';
+                        return (classes.includes('primary') || classes.includes('submit') || classes.includes('bg-blue')) && !b.disabled;
+                    });
+                }
+
+                if (!submitBtn && btns.length > 0) {
+                    submitBtn = btns[btns.length - 1];
+                }
+
+                if (submitBtn) submitBtn.click();
+            });
+
+            await isolatedPage.waitForTimeout(1200);
+
+            // Check for "preparing video" modal
+            const preparingText = await isolatedPage.evaluate(() => {
+                const text = document.body.innerText || '';
+                return text.includes('preparing your video') || text.includes('We are preparing');
+            });
+
+            if (preparingText) {
+                console.log('[VioryDownloader] Video requires processing - not immediately available');
+                await isolatedPage.close();
+                return {
+                    success: false,
+                    needsMyContent: true,
+                    message: 'This video requires processing. Please choose a different video that is ready for download.'
+                };
+            }
+
+            // Wait for download
+            const download = await downloadPromise;
+
+            if (download) {
+                let filename = download.suggestedFilename();
+                // Ensure unique filename to prevent overwriting
+                const timestamp = Date.now();
+                const uniqueFilename = `${timestamp}_${filename}`;
+                const savePath = path.join(this.downloadsPath, uniqueFilename);
+                console.log(`[VioryDownloader] Downloading: ${uniqueFilename}`);
+
+                if (onProgress) onProgress({ status: 'downloading', filename: uniqueFilename });
+
+                await download.saveAs(savePath);
+
+                // Verify file
+                if (!fs.existsSync(savePath)) {
+                    throw new Error('Download completed but file not found');
+                }
+
+                const stats = fs.statSync(savePath);
+                if (stats.size < 1000) {
+                    throw new Error('Downloaded file is too small, likely corrupt');
+                }
+
+                console.log(`[VioryDownloader] Saved: ${savePath} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
+
+                // Extract late mandatory credit
+                let mandatoryCredit = '';
+                try {
+                    await isolatedPage.evaluate(() => {
+                        const allElements = document.querySelectorAll('*');
+                        for (const el of allElements) {
+                            if (el.childNodes.length === 1 && el.textContent.trim() === 'Meta data') {
+                                const sibling = el.nextElementSibling;
+                                if (sibling && sibling.tagName === 'BUTTON') {
+                                    sibling.click();
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    });
+                    await isolatedPage.waitForTimeout(300);
+
+                    mandatoryCredit = await isolatedPage.evaluate(() => {
+                        const bodyText = document.body.innerText || '';
+                        const creditMatch = bodyText.match(/[Mm]andatory\s*credit[:\s]+([^\n]+)/);
+                        if (creditMatch && creditMatch[1]) {
+                            let credit = creditMatch[1].trim();
+                            credit = credit.replace(/[;].*$/, '').trim();
+                            credit = credit.replace(/\/[A-Z].*$/i, '').trim();
+                            credit = credit.replace(/\s*\/-.*$/, '').trim();
+                            credit = credit.replace(/\s+-\s+.*$/, '').trim();
+                            credit = credit.replace(/[.,;:\/]+$/, '').trim();
+                            if (credit.length >= 3 && credit.length <= 100) {
+                                return credit;
+                            }
+                        }
+                        return '';
+                    });
+                } catch (e) {
+                    console.log(`[VioryDownloader] Late credit extraction failed: ${e.message}`);
+                }
+
+                const finalCredit = earlyMandatoryCredit || mandatoryCredit || '';
+
+                // Close isolated page
+                await isolatedPage.close();
+                console.log('[VioryDownloader] Closed isolated page');
+
+                return {
+                    success: true,
+                    path: savePath,
+                    filename,
+                    videoTitle,
+                    mandatoryCredit: finalCredit
+                };
+            }
+
+            // No direct download - try fallback
+            console.log('[VioryDownloader] No direct download, checking for My Content...');
+            await isolatedPage.close();
+            return {
+                success: false,
+                message: 'Download did not start. Video may require processing.'
+            };
+
+        } catch (error) {
+            console.error(`[VioryDownloader] Isolated download error: ${error.message}`);
+            if (isolatedPage) {
+                try { await isolatedPage.close(); } catch (e) { }
+            }
+            return {
+                success: false,
+                message: error.message
+            };
+        }
     }
 
     /**
@@ -263,7 +697,7 @@ class VioryDownloader {
             return false;
         } catch (e) {
             console.error('[VioryDownloader] Login flow error:', e.message);
-            try { await this.saveCookies(); } catch (x) {}
+            try { await this.saveCookies(); } catch (x) { }
             if (onStatusChange) onStatusChange({ status: 'error', message: e.message });
             return false;
         }
@@ -283,16 +717,16 @@ class VioryDownloader {
                     const text = (el.textContent || '').toLowerCase();
                     return text.includes('sign in') || text.includes('log in') || text.includes('login');
                 });
-                
+
                 // Also check for user profile indicators (means logged in)
                 const profileIndicator = document.querySelector('[class*="avatar"], [class*="profile"], [class*="user-menu"]');
                 const myContentLink = document.querySelector('a[href*="my-content"], a[href*="mycontent"]');
-                
+
                 // If we have profile indicators, we're logged in
                 if (profileIndicator || myContentLink) {
                     return false; // NOT logged out
                 }
-                
+
                 // If we have sign in button, we're logged out
                 return !!(signInLink || signInButton);
             });
@@ -311,7 +745,7 @@ class VioryDownloader {
      */
     async verifySessionHeadless() {
         console.log('[VioryDownloader] Verifying session silently (headless)...');
-        
+
         // Check if we even have cookies first
         if (!this.hasSavedSession()) {
             console.log('[VioryDownloader] No saved session found');
@@ -369,7 +803,7 @@ class VioryDownloader {
                 });
                 const profileIndicator = document.querySelector('[class*="avatar"], [class*="profile"], [class*="user-menu"]');
                 const myContentLink = document.querySelector('a[href*="my-content"], a[href*="mycontent"]');
-                
+
                 if (profileIndicator || myContentLink) return false;
                 return !!(signInLink || signInButton);
             });
@@ -386,9 +820,9 @@ class VioryDownloader {
             return { valid: false, needsLogin: true, error: e.message };
         } finally {
             // Clean up temporary browser
-            if (tempPage) await tempPage.close().catch(() => {});
-            if (tempContext) await tempContext.close().catch(() => {});
-            if (tempBrowser) await tempBrowser.close().catch(() => {});
+            if (tempPage) await tempPage.close().catch(() => { });
+            if (tempContext) await tempContext.close().catch(() => { });
+            if (tempBrowser) await tempBrowser.close().catch(() => { });
         }
     }
 
@@ -444,559 +878,6 @@ class VioryDownloader {
     }
 
     /**
-     * Search for videos with Deep Analysis (smart matching)
-     * Opens top candidates to check VIDEO INFO and SHOT LIST
-     * @param {string} query - Search query
-     * @param {number} limit - Max results to return
-     * @returns {Array} - Array of video objects
-     */
-    async searchVideos(query, limit = 10) {
-        // CRITICAL FIX: Handle undefined/null query
-        if (!query || typeof query !== 'string') {
-            console.error('[VioryDownloader] Query is undefined or not a string:', query);
-            return [];
-        }
-
-        console.log('═══════════════════════════════════════════════════════════');
-        console.log(`[VioryDownloader] SEARCH REQUEST`);
-        console.log(`  Original Query: "${query}"`);
-
-        // Clean query - handle "ON SCREEN: ..." format
-        let cleanQuery = query;
-        if (query.includes(':')) {
-            cleanQuery = query.split(":")[1] || query;
-        }
-        const finalQuery = cleanQuery.replace(/[^\w\s-]/g, '').trim();
-
-        console.log(`  Cleaned Query:  "${finalQuery}"`);
-
-        if (!finalQuery) {
-            console.error('[VioryDownloader] Query is empty after cleaning');
-            return [];
-        }
-
-        const page = await this.ensurePage();
-
-        try {
-            // CORRECT URL format
-            const searchUrl = `https://www.viory.video/en/videos?search=${encodeURIComponent(finalQuery)}`;
-            console.log(`  Search URL:     ${searchUrl}`);
-            console.log('═══════════════════════════════════════════════════════════');
-
-            // Retry loop for search results page
-            let searchRetries = 3;
-            let searchSuccess = false;
-
-            while (searchRetries > 0 && !searchSuccess) {
-                try {
-                    // OPTIMIZED: Use domcontentloaded for faster initial response
-                    // ORIGINAL: await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
-                    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-
-                    // Check for server errors on search page
-                    const isError = await page.evaluate(() => {
-                        const title = document.title;
-                        const text = document.body.innerText;
-                        return title.includes('504') || title.includes('502') ||
-                            text.includes('Gateway Time-out') || text.includes('Bad Gateway');
-                    });
-
-                    if (isError) throw new Error('Search Page Server Error (504/502)');
-
-                    searchSuccess = true;
-                } catch (e) {
-                    console.warn(`[VioryDownloader] Search load failed: ${e.message}`);
-                    searchRetries--;
-                    if (searchRetries > 0) {
-                        // OPTIMIZED: Reduced from 3000ms to 1500ms
-                        // ORIGINAL: await new Promise(r => setTimeout(r, 3000));
-                        console.log(`[VioryDownloader] Retrying search in 1.5s...`);
-                        await new Promise(r => setTimeout(r, 1500));
-                    }
-                }
-            }
-
-            if (!searchSuccess) {
-                console.error('[VioryDownloader] Failed to load search page after 3 attempts');
-                return [];
-            }
-
-            await this.dismissPopups();
-
-            try {
-                // OPTIMIZED: Reduced from 30000ms to 10000ms
-                // ORIGINAL: await page.waitForSelector('a[href*="/videos/"]', { timeout: 30000 });
-                await page.waitForSelector('a[href*="/videos/"]', { timeout: 10000 });
-            } catch (e) {
-                console.log('[VioryDownloader] No videos found for query');
-                return [];
-            }
-
-            // Get candidate URLs (scrape basic info first)
-            const candidates = await page.evaluate((maxLimit) => {
-                const results = [];
-                const allLinks = document.querySelectorAll('a[href*="/videos/"]');
-                allLinks.forEach(link => {
-                    if (results.length >= maxLimit) return;
-                    const href = link.getAttribute('href');
-                    if (!href || href.includes('/videos?')) return;
-                    const fullUrl = href.startsWith('http') ? href : `https://www.viory.video${href}`;
-                    // Avoid duplicates
-                    if (!results.find(r => r.url === fullUrl)) {
-                        results.push({ url: fullUrl });
-                    }
-                });
-                return results;
-            }, 5); // Analyze top 5 videos deeply
-
-            console.log(`[VioryDownloader] Found ${candidates.length} candidates for Deep Analysis...`);
-
-            // DEEP ANALYSIS: Visit each video to get full metadata
-            const analyzedVideos = [];
-
-            for (const candidate of candidates) {
-                // Add retry logic for individual video analysis
-                let retries = 3;
-                let success = false;
-
-                while (retries > 0 && !success) {
-                    try {
-                        console.log(`[VioryDownloader] Analyzing: ${candidate.url} (Attempt ${4 - retries}/3)`);
-
-                        // OPTIMIZED: Reduced from 2000ms to 800ms for rate limiting
-                        // ORIGINAL: await new Promise(r => setTimeout(r, 2000));
-                        await new Promise(r => setTimeout(r, 800));
-
-                        // OPTIMIZED: Use domcontentloaded instead of networkidle for faster load
-                        // ORIGINAL: await page.goto(candidate.url, { waitUntil: 'networkidle', timeout: 30000 });
-                        await page.goto(candidate.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-
-                        // OPTIMIZED: Wait for title selector instead of fixed timeout
-                        // This ensures page is ready before proceeding
-                        await page.waitForSelector('h1', { timeout: 3000 }).catch(() => {});
-                        
-                        // OPTIMIZED: Reduced from 1500ms to 600ms for dynamic content
-                        // ORIGINAL: await page.waitForTimeout(1500);
-                        await page.waitForTimeout(600);
-
-                        // CHECK FOR ERROR PAGES (504, 403, etc)
-                        const isError = await page.evaluate(() => {
-                            const text = document.body.innerText;
-                            const title = document.title;
-                            return title.includes('504') || title.includes('502') || title.includes('403') ||
-                                text.includes('Gateway Time-out') || text.includes('Bad Gateway') ||
-                                text.includes('Access Denied');
-                        });
-
-                        if (isError) {
-                            throw new Error('Detected Server Error Page (504/502/403)');
-                        }
-
-                        success = true;
-                    } catch (e) {
-                        console.warn(`[VioryDownloader] Failed to load video page: ${e.message}`);
-                        retries--;
-                        if (retries > 0) {
-                            const waitTime = (4 - retries) * 3000;
-                            console.log(`[VioryDownloader] Retrying in ${waitTime / 1000}s...`);
-                            await new Promise(r => setTimeout(r, waitTime));
-                        } else {
-                            console.error(`[VioryDownloader] Skipper video after 3 failed attempts: ${candidate.url}`);
-                            continue; // Skip to next candidate
-                        }
-                    }
-                }
-
-                if (!success) continue;
-
-                try {
-                    // STEP 1: Expand "Shot list" section (required to access content)
-                    const shotListExpanded = await page.evaluate(() => {
-                        const allElements = document.querySelectorAll('*');
-                        for (const el of allElements) {
-                            if (el.childNodes.length === 1 && el.textContent.trim() === 'Shot list') {
-                                // Found the header, look for the next button sibling
-                                let sibling = el.nextElementSibling;
-                                if (sibling && sibling.tagName === 'BUTTON') {
-                                    sibling.click();
-                                    return true;
-                                }
-                                // Or check parent's next sibling
-                                const parent = el.parentElement;
-                                if (parent) {
-                                    sibling = parent.nextElementSibling;
-                                    if (sibling && sibling.tagName === 'BUTTON') {
-                                        sibling.click();
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                        return false;
-                    });
-                    
-                    if (shotListExpanded) {
-                        await page.waitForTimeout(500); // Wait for expansion animation
-                    }
-
-                    // STEP 2: Extract metadata
-                    const metadata = await page.evaluate(() => {
-                        const result = {
-                            title: '',
-                            description: '',
-                            videoInfo: '',
-                            shotList: '',
-                            mandatoryCredit: '',
-                            duration: '',
-                            allText: ''
-                        };
-
-                        // TITLE - from H1 with fallbacks
-                        const h1 = document.querySelector('h1');
-                        if (h1) result.title = h1.innerText.trim();
-
-                        if (!result.title) {
-                            const metaTitle = document.querySelector('meta[property="og:title"]');
-                            if (metaTitle) result.title = metaTitle.getAttribute('content');
-                        }
-                        if (!result.title) {
-                            result.title = document.title.replace('| Viory', '').replace('| Video Viory', '').trim();
-                        }
-
-                        // Get full page text
-                        const bodyText = document.body.innerText;
-                        result.allText = bodyText.substring(0, 5000);
-
-                        // VIDEO INFO - Extract paragraphs between title and "Shot list"
-                        const shotListIndex = bodyText.indexOf('Shot list');
-                        if (shotListIndex !== -1) {
-                            const titleIndex = bodyText.indexOf(result.title);
-                            if (titleIndex !== -1) {
-                                let videoInfoRaw = bodyText.substring(titleIndex + result.title.length, shotListIndex);
-                                // Clean up navigation/UI text
-                                videoInfoRaw = videoInfoRaw
-                                    .replace(/Download video/gi, '')
-                                    .replace(/Link copied!/gi, '')
-                                    .replace(/Copy Link/gi, '')
-                                    .replace(/\d{1,2}:\d{2}\s*(GMT|UTC)?[+-]?\d{0,4}/g, '')
-                                    .trim();
-                                
-                                // Extract meaningful paragraphs (more than 50 chars)
-                                const paragraphs = videoInfoRaw.split(/\n+/).filter(p => p.trim().length > 50);
-                                result.videoInfo = paragraphs.slice(0, 6).join('\n\n').substring(0, 2000);
-                            }
-                        }
-
-                        // SHOT LIST - Simple extraction between "Shot list" and "Meta data"
-                        if (shotListIndex !== -1) {
-                            const metaDataIndex = bodyText.indexOf('Meta data');
-                            if (metaDataIndex !== -1 && metaDataIndex > shotListIndex) {
-                                let shotText = bodyText.substring(shotListIndex + 9, metaDataIndex).trim();
-                                // Remove any "Expand"/"Collapse" text at the start
-                                shotText = shotText.replace(/^(Expand|Collapse)\s*/i, '').trim();
-                                
-                                if (shotText.length > 20) {
-                                    result.shotList = shotText.substring(0, 2000);
-                                }
-                            }
-                        }
-                        
-                        // Fallback: Look for shot type patterns if no content found
-                        if (!result.shotList || result.shotList.length < 30) {
-                            const patterns = [
-                                /VARIOUS[,:\s]+[^\n]{10,300}/gi,
-                                /SOT[,:\s]+[^\n]{10,300}/gi,
-                                /[WMC]\/S[,:\s]+[^\n]{5,200}/gi
-                            ];
-                            for (const pattern of patterns) {
-                                const matches = bodyText.match(pattern);
-                                if (matches && matches.length > 0) {
-                                    result.shotList = matches.join('\n').substring(0, 2000);
-                                    break;
-                                }
-                            }
-                        }
-
-                        // MANDATORY CREDIT
-                        // Extract only the credit name, not usage restrictions
-                        // Examples: "World Economic Forum; News use only" → "World Economic Forum"
-                        //           "World Economic Forum/News use only" → "World Economic Forum"
-                        //           "Palazzo Chigi" → "Palazzo Chigi"
-                        const creditMatch = bodyText.match(/[Mm]andatory\s*credit[:\s]+([^\n]+)/);
-                        if (creditMatch && creditMatch[1]) {
-                            let credit = creditMatch[1].trim();
-                            // Remove everything after common separators (restrictions, usage info, etc.)
-                            credit = credit.replace(/[;].*$/, '').trim();       // Remove after semicolon ;
-                            credit = credit.replace(/\/[A-Z].*$/i, '').trim();  // Remove after /UpperCase (like /News)
-                            credit = credit.replace(/\s*\/-.*$/, '').trim();    // Remove after /-
-                            credit = credit.replace(/\s*\/\s*-.*$/, '').trim(); // Remove after / -
-                            credit = credit.replace(/\s+-\s+.*$/, '').trim();   // Remove after " - " 
-                            // Clean up any trailing punctuation or slashes
-                            credit = credit.replace(/[.,;:\/]+$/, '').trim();
-                            if (credit.length >= 3 && credit.length <= 100) {
-                                result.mandatoryCredit = credit;
-                            }
-                        }
-
-                        // DURATION - from Meta data section
-                        const durationMatch = bodyText.match(/Duration[\s:]*(\d{1,2}:\d{2})/i);
-                        if (durationMatch) {
-                            result.duration = durationMatch[1];
-                        } else {
-                            const simpleDuration = bodyText.match(/\d{1,2}:\d{2}/);
-                            if (simpleDuration) result.duration = simpleDuration[0];
-                        }
-
-                        // Extract description from meta
-                        const metaDesc = document.querySelector('meta[name="description"]');
-                        if (metaDesc) result.description = metaDesc.content;
-
-                        return result;
-                    });
-
-                    // Calculate score
-                    const score = this.calculateRelevance(finalQuery, metadata);
-
-                    analyzedVideos.push({
-                        ...candidate,
-                        ...metadata,
-                        score
-                    });
-
-                    // Log extracted metadata
-                    console.log(`   > Score: ${score.total} | Title: "${metadata.title.substring(0, 40)}..."`);
-                    console.log(`   > VideoInfo: ${metadata.videoInfo ? `${metadata.videoInfo.length} chars` : '(empty)'}`);
-                    console.log(`   > ShotList: ${metadata.shotList ? `${metadata.shotList.length} chars` : '(empty)'}`);
-                    if (metadata.shotList) {
-                        console.log(`   > 📋 Shot preview: "${metadata.shotList.substring(0, 100)}..."`);
-                    }
-                    if (metadata.mandatoryCredit) {
-                        console.log(`   > ✅ MandatoryCredit: "${metadata.mandatoryCredit}"`);
-                    }
-
-                } catch (e) {
-                    console.warn(`[VioryDownloader] Failed to analyze ${candidate.url}:`, e.message);
-                }
-            }
-
-            // Sort by score
-            analyzedVideos.sort((a, b) => b.score.total - a.score.total);
-
-            // Filter out low relevance (optional, currently just taking best)
-            return analyzedVideos;
-
-        } catch (e) {
-            console.error('[VioryDownloader] Search failed:', e.message);
-            throw e;
-        }
-    }
-
-    /**
-     * Capture screenshot of video thumbnail/preview
-     * @param {string} selector - CSS selector for the element to capture
-     * @returns {Buffer|null} Screenshot buffer or null if failed
-     */
-    async captureScreenshot(selector = null) {
-        try {
-            const page = await this.ensurePage();
-
-            if (selector) {
-                // Capture specific element
-                const element = await page.$(selector);
-                if (element) {
-                    const buffer = await element.screenshot({ type: 'png' });
-                    console.log(`[VioryDownloader] Captured element screenshot (${selector})`);
-                    return buffer;
-                }
-            }
-
-            // Fallback: capture video preview area or main content
-            const fallbackSelectors = [
-                'video',
-                '[class*="video-player"]',
-                '[class*="preview"]',
-                'img[src*="thumb"]',
-                '.video-container',
-                'main img',
-                '.aspect-video'
-            ];
-
-            for (const sel of fallbackSelectors) {
-                try {
-                    const el = await page.$(sel);
-                    if (el) {
-                        const buffer = await el.screenshot({ type: 'png' });
-                        console.log(`[VioryDownloader] Captured screenshot via fallback: ${sel}`);
-                        return buffer;
-                    }
-                } catch (e) {
-                    // Try next selector
-                }
-            }
-
-            // Last resort: capture viewport
-            console.log('[VioryDownloader] Capturing full viewport screenshot');
-            const buffer = await page.screenshot({
-                type: 'png',
-                clip: { x: 0, y: 100, width: 800, height: 450 } // Approximate video area
-            });
-            return buffer;
-
-        } catch (error) {
-            console.error('[VioryDownloader] Screenshot capture failed:', error.message);
-            return null;
-        }
-    }
-
-    /**
-     * Enhanced search with screenshot capture for visual validation
-     * @param {string} query - Search query
-     * @param {number} limit - Max results
-     * @param {Object} options - Additional options
-     * @returns {Array} Videos with metadata and screenshots
-     */
-    async searchVideosWithScreenshots(query, limit = 5, options = {}) {
-        const { captureScreenshots = true, blockAnalysis = null } = options;
-
-        // First do the regular search
-        const videos = await this.searchVideos(query, limit);
-
-        if (!captureScreenshots || videos.length === 0) {
-            return videos;
-        }
-
-        console.log(`[VioryDownloader] Capturing screenshots for ${videos.length} videos...`);
-
-        const page = await this.ensurePage();
-
-        for (let i = 0; i < videos.length; i++) {
-            const video = videos[i];
-
-            // Check cache first
-            if (screenshotCache.has(video.url)) {
-                video.screenshot = screenshotCache.get(video.url);
-                console.log(`[VioryDownloader] Using cached screenshot for video ${i + 1}`);
-                continue;
-            }
-
-            try {
-                // Navigate to video page if not already there
-                const currentUrl = page.url();
-                if (!currentUrl.includes(video.url.split('/').pop())) {
-                    await page.goto(video.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-                    await page.waitForTimeout(1500);
-                }
-
-                // Capture screenshot
-                const screenshot = await this.captureScreenshot();
-                if (screenshot) {
-                    video.screenshot = screenshot;
-                    video.screenshotBase64 = screenshot.toString('base64');
-                    screenshotCache.set(video.url, screenshot);
-                    console.log(`[VioryDownloader] Screenshot captured for video ${i + 1}: ${video.title?.substring(0, 30)}...`);
-                }
-
-                // Small delay between captures
-                if (i < videos.length - 1) {
-                    await page.waitForTimeout(500);
-                }
-
-            } catch (error) {
-                console.warn(`[VioryDownloader] Failed to capture screenshot for video ${i + 1}:`, error.message);
-                video.screenshot = null;
-            }
-        }
-
-        return videos;
-    }
-
-    /**
-     * Search with AI-powered queries (uses script analyzer queries)
-     * @param {Array} queries - Array of search queries to try (from scriptAnalyzer)
-     * @param {Object} blockAnalysis - Block analysis with visual_targets
-     * @param {Object} options - Search options
-     * @returns {Object} Best videos found
-     */
-    async searchWithSmartQueries(queries, blockAnalysis, options = {}) {
-        const {
-            maxVideosPerQuery = 3,
-            captureScreenshots = true,
-            onProgress = () => {}
-        } = options;
-
-        const allVideos = [];
-        const seenUrls = new Set();
-        const successfulQueries = [];
-
-        console.log(`[VioryDownloader] Smart search with ${queries.length} queries...`);
-
-        for (let i = 0; i < queries.length; i++) {
-            const query = queries[i];
-
-            onProgress({
-                type: 'searching',
-                query,
-                attemptNum: i + 1,
-                totalQueries: queries.length,
-                message: `Buscando: "${query}"`
-            });
-
-            try {
-                const videos = await this.searchVideosWithScreenshots(
-                    query,
-                    maxVideosPerQuery,
-                    { captureScreenshots, blockAnalysis }
-                );
-
-                if (videos && videos.length > 0) {
-                    let addedCount = 0;
-
-                    for (const video of videos) {
-                        if (!seenUrls.has(video.url)) {
-                            seenUrls.add(video.url);
-                            video.sourceQuery = query;
-                            video.queryIndex = i;
-                            allVideos.push(video);
-                            addedCount++;
-                        }
-                    }
-
-                    if (addedCount > 0) {
-                        successfulQueries.push(query);
-                        onProgress({
-                            type: 'found',
-                            query,
-                            videoCount: addedCount,
-                            totalSoFar: allVideos.length,
-                            attemptNum: i + 1
-                        });
-                    }
-                }
-
-                // Delay between queries
-                if (i < queries.length - 1) {
-                    await new Promise(r => setTimeout(r, 1000));
-                }
-
-            } catch (error) {
-                console.error(`[VioryDownloader] Query "${query}" failed:`, error.message);
-                onProgress({
-                    type: 'error',
-                    query,
-                    error: error.message,
-                    attemptNum: i + 1
-                });
-            }
-        }
-
-        return {
-            videos: allVideos,
-            successfulQueries,
-            totalFound: allVideos.length
-        };
-    }
-
-    /**
      * INTELLIGENT VIDEO SEARCH PIPELINE
      * Complete 6-stage pipeline with Gemini analysis and visual validation
      * Exact copy of test-intelligent-search.cjs logic that produced good results
@@ -1006,6 +887,7 @@ class VioryDownloader {
      * @param {string} geminiApiKey - Gemini API key
      * @param {Object} options - Search options
      * @param {Buffer} options.segmentFrame - Optional screenshot/frame from the segment
+     * @param {Function} options.shouldSkip - Callback to check if user requested skip
      * @returns {Object} Best matching video with full analysis
      */
     async intelligentSearch(headline, text, geminiApiKey, options = {}) {
@@ -1014,8 +896,16 @@ class VioryDownloader {
             maxVideosToAnalyze = 5,
             topNForVisualValidation = 3,
             segmentFrame = null,  // Screenshot from the news segment
-            onProgress = () => {}
+            onProgress = () => { },
+            shouldSkip = () => false  // Callback to check if user requested skip
         } = options;
+
+        // Helper to check for skip and throw if needed
+        const checkSkip = () => {
+            if (shouldSkip()) {
+                throw new Error('SKIPPED_BY_USER');
+            }
+        };
 
         console.log('\n' + '='.repeat(70));
         console.log('INTELLIGENT VIDEO SEARCH PIPELINE');
@@ -1040,44 +930,159 @@ class VioryDownloader {
             const startStage1 = Date.now();
 
             const genAI = new GoogleGenerativeAI(geminiApiKey);
-            // Use gemini-3-flash for text/query generation (smarter)
+            // Use gemini-3-flash-preview for text/query generation (smarter)
             const textModel = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
-            // Use gemini-2.5-flash for vision/image analysis (optimized for images)
-            const visionModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+            // Use gemini-3-flash-preview for vision/image analysis
+            const visionModel = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
 
-            const analysisPrompt = `You are an expert news video researcher. Analyze this news segment to find the best matching B-roll footage.
+            const analysisPrompt = `You are a news video researcher for Viory.video. Analyze this segment and generate optimal search queries.
 
-SEGMENT TO ANALYZE:
-Headline: "${headline}"
-Text: "${text}"
+SEGMENT:
+- Headline: "${headline}"
+- Text: "${text}"
 
-TASK: Generate search queries that will find RELEVANT VIDEO FOOTAGE on a news video platform.
+RESPOND ONLY WITH VALID JSON.
 
-IMPORTANT RULES:
-1. Focus on the MAIN VISUAL SUBJECT - what should viewers SEE in the video
-2. Generate queries from MOST SPECIFIC to MOST GENERIC
-3. Each query should be 1-3 words (platform search works better with short queries)
-4. Include the country name in relevant queries
+═══════════════════════════════════════════════════════════════════════
+⚠️ CRITICAL: QUERY FORMAT FOR ACCURATE RESULTS
+═══════════════════════════════════════════════════════════════════════
 
-PERSON DETECTION - CRITICAL:
-- Identify if there is an IMPORTANT PERSON mentioned (politician, leader, celebrity, executive, etc.)
-- If a specific person is mentioned by name, they should appear in the B-roll footage
-- Set "has_important_person" to true if footage MUST show a specific person
-- Set "person_name" to the full name of the person who must appear
-- Set "person_description" to describe how they look or their role (e.g., "older man with white hair", "female politician")
+STEP 1: Determine segment type
 
-OUTPUT JSON ONLY:
+SET has_important_person = true IF:
+- World leader mentioned by NAME (Trump, Putin, Xi, Netanyahu, Peskov, etc.)
+- Story is about their statements, decisions, or actions
+- Examples: "Trump announces fleet", "Netanyahu warns Iran", "Peskov says Russia ready"
+
+SET has_important_person = false IF:
+- About countries, events, military, or general topics
+- Generic titles: "officials", "commanders", "government"
+- Examples: "USS deployed", "Iran military exercises", "Trade war escalates"
+
+═══════════════════════════════════════════════════════════════════════
+STEP 2: QUERY FORMAT - THIS IS CRITICAL
+═══════════════════════════════════════════════════════════════════════
+
+IF has_important_person = true (PERSON MODE):
+Use QUOTED EXACT PHRASES to find videos of THE PERSON speaking, not reactions:
+
+✅ CORRECT FORMAT (uses quotes for exact match):
+  "queries": ["\"Trump says\"", "\"Trump announces\"", "\"Trump warns\"", "Trump White House"]
+
+❌ WRONG FORMAT (returns OTHER people talking about Trump):
+  "queries": ["Trump says", "Trump Iran", "Trump statement"]
+
+The quotes force EXACT phrase matching, filtering out reaction videos like "Venezuela responds to Trump".
+
+PERSON MODE QUERY RULES (CRITICAL):
+- Query 1: MUST be quoted "[Name] says" OR "[Name] speaks" (Finds strict speech)
+- Query 2: "[Name] soundbite" (Finds interviews/talking heads)
+- Query 3: "[Name] speech" OR "[Name] remarks"
+- Query 4: [Name] + specific location (White House, Mar-a-Lago, Kremlin)
+- Query 5: Fallback like "US president" or "Russian official"
+
+IF has_important_person = false (FOOTAGE MODE):
+Use COUNTRY + ACTION queries to get footage from the correct country:
+
+✅ CORRECT FORMAT (country + visual action):
+  "queries": ["IRGC parade", "Iran troops military", "Tehran streets", "Iran missiles", "Persian Gulf"]
+
+❌ WRONG FORMAT (too generic - returns random countries):
+  "queries": ["military parade", "troops", "missiles", "naval fleet"]
+
+FOOTAGE MODE QUERY RULES:
+- EVERY query MUST include country name OR country-specific organization (IRGC, Pentagon, Kremlin)
+- Add ACTION WORDS: parade, sailing, launch, footage, troops, streets
+- Use specific locations: Tehran, Washington, Moscow, Tel Aviv
+
+TESTED EXAMPLES THAT WORK:
+- "IRGC parade" → Iran military parade with missiles ✅
+- "Iran troops military" → Tehran billboard, Iranian soldiers ✅  
+- "Russia military parade" → Russian corvette, tanks ✅
+- "warship sailing" → actual ship footage ✅
+- "missile launch footage" → missile launches ✅
+
+MILITARY CONTENT STRATEGY (CRITICAL):
+For US Military, specific LOCATIONS work much better than generic terms:
+- ✅ "Pentagon military" (Finds official briefings, B-roll)
+- ✅ "Ramstein Air Base" (Finds specific aircraft in Europe)
+- ✅ "Andrews Air Force Base" (Finds VIP aircraft, Air Force One)
+- ✅ "US aircraft carrier" (Specific ship class works well)
+- ❌ "US Air Force jet" (Too generic, often returns wrong country)
+
+If content is US Military, queries 1-3 MUST use locations like "Pentagon", "Ramstein", or specific bases if mentioned.
+
+EXAMPLES THAT FAIL:
+- "military parade" → returns Central African Republic ❌
+- "aircraft carrier" → returns person talking about carriers ❌
+- "USS Abraham Lincoln" → returns Russian official reacting ❌
+
+═══════════════════════════════════════════════════════════════════════
+OUTPUT (VALID JSON ONLY - NO MARKDOWN):
+═══════════════════════════════════════════════════════════════════════
 {
-  "main_subject": "What the video should primarily show",
-  "country": "Primary country involved",
-  "has_important_person": true/false,
-  "person_name": "Full name of person who must appear (or null)",
-  "person_description": "Description of the person's appearance/role (or null)",
-  "key_visuals": ["visual1", "visual2", "visual3"],
-  "must_show": ["essential element 1", "essential element 2"],
-  "avoid": ["what would be wrong"],
-  "queries": ["query1", "query2", "query3", "query4", "query5", "query6", "query7", "query8"]
-}`;
+  "main_subject": "what the video should show",
+  "country": "primary country/countries (e.g. Iran/USA)",
+  "secondary_country": "second country or null",
+  "location_keywords": ["Tehran", "Washington", etc.],
+  "has_important_person": true or false,
+  "person_name": "full name or null",
+  "person_description": "physical description for visual ID",
+  "key_visuals": ["what must be visible"],
+  "must_show": ["required elements with country context"],
+  "avoid": ["wrong countries", "reactions instead of direct content"],
+  "queries": ["query1", "query2", "query3", "query4", "query5"]
+}
+
+RULES:
+- has_important_person=true → use QUOTED queries: "\"Trump says\""
+- has_important_person=false → use COUNTRY+ACTION: "IRGC parade", "Iran military"
+- NEVER use generic queries without country: "protest", "military", "diplomacy"
+
+═══════════════════════════════════════════════════════════════════════
+VIP LOOKUP TABLE (USE THESE EXACT QUERIES IF PERSON MATCHES):
+═══════════════════════════════════════════════════════════════════════
+- Donald Trump      → 1st Query MUST BE: "\"Trump says\""
+- Vladimir Putin    → 1st Query MUST BE: "\"Putin says\""
+- Ali Khamenei      → 1st Query MUST BE: "\"Khamenei says\""
+- Nicolas Maduro    → 1st Query MUST BE: "\"Maduro says\""
+- Antonio Guterres  → 1st Query MUST BE: "\"Antonio Guterres UN\""
+- He Lifeng         → 1st Query MUST BE: "He Lifeng" (No quotes)
+- Xi Jinping        → 1st Query MUST BE: "\"Xi Jinping\"" (Quotes)
+- Marco Rubio       → 1st Query MUST BE: "\"Marco Rubio\"" (Quotes)
+
+═══════════════════════════════════════════════════════════════════════
+TECHNICAL ENTITY LOOKUP (For Aircraft, Vehicles, Equipment, Brands):
+═══════════════════════════════════════════════════════════════════════
+IF the headline mentions:
+- Aircraft model (EA-37B, F-35, Su-57, MiG-31, B-21, A-10, C-130)
+- Vehicle model (M1 Abrams, Leopard 2, T-90, HMMWV)
+- Weapon system (HIMARS, Patriot, S-400, Stinger, Javelin)
+- Engine/manufacturer brand (Rolls-Royce, Pratt & Whitney, GE Aviation)
+- Ship class (USS, HMS, destroyer, frigate, aircraft carrier)
+
+THEN use GENERIC CATEGORY + COUNTRY queries (obscure model numbers return zero results):
+- Query 1: "[aircraft type] [country]" e.g. "US military aircraft", "fighter jet USA"
+- Query 2: "[broader category]" e.g. "Air Force footage", "military jet"
+- Query 3: "[action + subject]" e.g. "fighter takeoff", "jet flying"
+- Query 4: "[country military]" e.g. "US military footage", "Pentagon"
+- Query 5: "[generic fallback]" e.g. "military aviation", "aircraft footage"
+
+⚠️ CRITICAL RULE: Query 5 MUST ALWAYS be ultra-generic video footage query!
+    Query 5 is your SAFETY NET. Use ONLY these types of fallbacks:
+    - "military footage" (for any military topic)
+    - "news footage" (for any news topic)  
+    - "documentary footage" (for historical topics)
+    - "industry footage" (for manufacturing/business)
+    - "[country] news footage" (country-specific fallback)
+
+EXAMPLES (VERY IMPORTANT - LEARN FROM THESE):
+- "EA-37B Compass Call electronic warfare" → ["US Air Force jet", "US electronic warfare", "military aircraft takeoff", "Pentagon footage", "military footage"]
+- "Rolls-Royce engine manufacturing issues" → ["aircraft engine factory", "jet engine", "aviation industry", "manufacturing facility", "industry footage"]
+- "F-35 delivery to Israel" → ["Israel Air Force", "military jet Israel", "fighter plane", "Israel defense", "military footage"]
+- "USS Abraham Lincoln deployment" → ["US Navy aircraft carrier", "warship sailing", "naval fleet", "US Navy footage", "military footage"]
+- "B-21 Raider stealth bomber" → ["US bomber aircraft", "Air Force bomber", "stealth plane", "Pentagon footage", "military footage"]
+═══════════════════════════════════════════════════════════════════════`;
 
             const analysisResult = await textModel.generateContent(analysisPrompt);
             const analysisText = analysisResult.response.text().replace(/```json\n?|```/g, '').trim();
@@ -1090,7 +1095,7 @@ OUTPUT JSON ONLY:
             console.log(`   Key Visuals: ${analysis.key_visuals?.join(', ')}`);
             console.log(`   Must Show: ${analysis.must_show?.join(', ')}`);
             console.log(`   Queries: ${analysis.queries?.join(', ')}`);
-            
+
             // Log person detection
             if (analysis.has_important_person) {
                 console.log(`   [PERSON DETECTED] ${analysis.person_name}`);
@@ -1101,12 +1106,12 @@ OUTPUT JSON ONLY:
             console.log(`   Time: ${results.timings.stage1}ms`);
 
             // Send detailed AI analysis to UI with person detection info
-            const personInfo = analysis.has_important_person 
-                ? `[PERSONA: ${analysis.person_name}] ` 
+            const personInfo = analysis.has_important_person
+                ? `[PERSONA: ${analysis.person_name}] `
                 : '[FOOTAGE GENERAL] ';
-            
-            onProgress({ 
-                stage: 1, 
+
+            onProgress({
+                stage: 1,
                 message: `${personInfo}Subject: "${analysis.main_subject}" | Looking for: ${analysis.key_visuals?.slice(0, 2).join(', ')}`,
                 analysis: analysis,
                 personDetected: analysis.has_important_person,
@@ -1119,13 +1124,13 @@ OUTPUT JSON ONLY:
             // Simple check: Is this [person_name]? Yes/No
             // ================================================================
             let segmentPersonConfirmed = null;  // null = no frame, true = person confirmed, false = not that person or no person
-            
+
             if (segmentFrame && analysis.has_important_person && analysis.person_name) {
                 console.log('\n[STAGE 1.5] Person Identification in Segment...');
                 console.log(`   Checking if segment shows: ${analysis.person_name}`);
                 onProgress({ stage: 1.5, message: `Verificando si el segmento muestra a ${analysis.person_name}...` });
                 const startStage15 = Date.now();
-                
+
                 try {
                     // Simple direct question: Is this person X?
                     const identifyPrompt = `Look at this image. Is the person shown "${analysis.person_name}"?
@@ -1144,9 +1149,9 @@ Answer with JSON only:
 
                     const identifyText = identifyResult.response.text().replace(/```json\n?|```/g, '').trim();
                     const identification = JSON.parse(identifyText);
-                    
+
                     segmentPersonConfirmed = identification.is_this_person === true && identification.confidence >= 0.7;
-                    
+
                     results.segmentPersonCheck = {
                         expectedPerson: analysis.person_name,
                         isConfirmed: segmentPersonConfirmed,
@@ -1155,7 +1160,7 @@ Answer with JSON only:
                     };
 
                     results.timings.stage15 = Date.now() - startStage15;
-                    
+
                     // Log result
                     if (segmentPersonConfirmed) {
                         console.log(`   [CONFIRMADO] El segmento muestra a ${analysis.person_name} (${(identification.confidence * 100).toFixed(0)}% seguro)`);
@@ -1165,9 +1170,9 @@ Answer with JSON only:
                     console.log(`   Time: ${results.timings.stage15}ms`);
 
                     // Send to UI
-                    onProgress({ 
-                        stage: 1.5, 
-                        message: segmentPersonConfirmed 
+                    onProgress({
+                        stage: 1.5,
+                        message: segmentPersonConfirmed
                             ? `[CONFIRMADO] Segmento muestra a ${analysis.person_name} - B-roll debe mostrar la misma persona`
                             : `[INFO] Persona en segmento: ${identification.who_is_shown || 'no identificada'}`,
                         personConfirmed: segmentPersonConfirmed,
@@ -1178,8 +1183,8 @@ Answer with JSON only:
 
                 } catch (error) {
                     console.error(`   Person identification failed: ${error.message}`);
-                    onProgress({ 
-                        stage: 1.5, 
+                    onProgress({
+                        stage: 1.5,
                         message: `Identificacion fallida: ${error.message?.substring(0, 50)}`,
                         error: true
                     });
@@ -1195,164 +1200,848 @@ Answer with JSON only:
             // Store for use in Stage 5
             results.segmentPersonConfirmed = segmentPersonConfirmed;
 
+            // Check for user skip request before starting search
+            checkSkip();
+
             // ================================================================
             // STAGE 2: VIORY SEARCH - Search with generated queries
+            // OPTIMIZED: Parallel search with 3 pages for ~3x speed improvement
             // ================================================================
-            console.log('\n[STAGE 2] Viory Search...');
+            console.log('\n[STAGE 2] Viory Search (PARALLEL MODE - 3 pages)...');
             const startStage2 = Date.now();
 
-            const page = await this.ensurePage();
+            const page = await this.ensurePage(); // Main page - will be reused in Stage 3
             const allVideos = [];
             const seenUrls = new Set();
             const country = (analysis.country || '').toLowerCase();
             const queriesToUse = analysis.queries.slice(0, maxQueries);
-            
-            onProgress({ stage: 2, message: `Searching with ${queriesToUse.length} queries...` });
+            const SEARCH_PARALLEL_PAGES = 5; // Increased from 3 to 5 for faster search
 
-            // Track which query index each video came from (lower = more specific = higher priority)
-            let queryIndex = 0;
-            
-            for (const query of queriesToUse) {
-                console.log(`   Searching: "${query}"`);
-                onProgress({ stage: 2, message: `Searching: "${query}"` });
+            onProgress({ stage: 2, message: `[Search] Searching with ${queriesToUse.length} queries using ${SEARCH_PARALLEL_PAGES} parallel pages...` });
 
+            // Helper function to search with a single query on a given page
+            const searchWithQuery = async (query, pageInstance, queryIndex) => {
                 try {
                     const searchUrl = `https://www.viory.video/en/videos?search=${encodeURIComponent(query)}`;
-                    console.log(`      URL: ${searchUrl}`);
-                    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-                    console.log(`      Page loaded`);
+                    await pageInstance.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
                     try {
-                        await page.waitForSelector('a[href*="/videos/"]', { timeout: 8000 });
-                        console.log(`      Found video links`);
+                        await pageInstance.waitForSelector('a[href*="/videos/"]', { timeout: 8000 });
                     } catch (e) {
-                        console.log(`      No results for "${query}" (selector timeout)`);
-                        const pageContent = await page.evaluate(() => document.body.innerText.substring(0, 500));
-                        console.log(`      Page content preview: ${pageContent.substring(0, 200)}...`);
-                        queryIndex++;
-                        continue;
+                        return { query, queryIndex, results: [], error: 'no_results' };
                     }
 
-                    await page.waitForTimeout(500);
+                    await pageInstance.waitForTimeout(300);
 
-                    // Get results with titles
-                    const searchResults = await page.evaluate(() => {
+                    // Get results with titles AND thumbnail URLs
+                    const searchResults = await pageInstance.evaluate(() => {
                         const videos = [];
                         const links = document.querySelectorAll('a[href*="/videos/"]');
-                        
+
                         links.forEach(link => {
                             const href = link.getAttribute('href');
                             if (!href || href.endsWith('/videos') || href.endsWith('/videos/') || href.includes('?')) return;
-                            
+
                             const container = link.closest('article, [class*="card"], div');
                             let title = '';
                             const h2 = container?.querySelector('h2, h3');
                             if (h2) title = h2.innerText.trim();
                             if (!title) title = link.innerText.trim().split('\n')[0];
-                            
+
+                            // Get thumbnail URL from the image inside the link/container
+                            let thumbnailUrl = '';
+                            const img = link.querySelector('img') || container?.querySelector('img');
+                            if (img) {
+                                thumbnailUrl = img.src || img.getAttribute('src') || '';
+                                // Convert small thumbnails to larger versions if possible
+                                if (thumbnailUrl.includes('/small_')) {
+                                    thumbnailUrl = thumbnailUrl.replace('/small_', '/');
+                                }
+                            }
+
                             const fullUrl = href.startsWith('http') ? href : `https://www.viory.video${href}`;
-                            
+
                             if (title && !videos.some(v => v.url === fullUrl)) {
-                                videos.push({ url: fullUrl, title: title.substring(0, 200) });
+                                videos.push({
+                                    url: fullUrl,
+                                    title: title.substring(0, 200),
+                                    thumbnailUrl: thumbnailUrl
+                                });
                             }
                         });
-                        
-                        return videos.slice(0, 8);
+
+                        return videos.slice(0, 12); // Get more results for thumbnail filtering
                     });
 
-                    console.log(`      Found ${searchResults.length} results`);
+                    return { query, queryIndex, results: searchResults, error: null };
+                } catch (error) {
+                    return { query, queryIndex, results: [], error: error.message };
+                }
+            };
+
+            // Create additional pages for parallel search (reuse main page)
+            const searchPages = [page];
+            try {
+                for (let i = 1; i < SEARCH_PARALLEL_PAGES; i++) {
+                    const newPage = await this.context.newPage();
+                    searchPages.push(newPage);
+                }
+                console.log(`   Created ${SEARCH_PARALLEL_PAGES} parallel search pages`);
+            } catch (e) {
+                console.warn(`   Could not create extra search pages: ${e.message}`);
+            }
+
+            // Process queries in parallel batches
+            const numSearchBatches = Math.ceil(queriesToUse.length / searchPages.length);
+            let queriesCompleted = 0;
+
+            for (let batchNum = 0; batchNum < numSearchBatches; batchNum++) {
+                checkSkip();
+
+                const batchStart = batchNum * searchPages.length;
+                const batchQueries = queriesToUse.slice(batchStart, batchStart + searchPages.length);
+
+                // Log batch start with query names
+                const queryNames = batchQueries.map(q => `"${q.substring(0, 30)}"`).join(', ');
+                console.log(`   [Batch ${batchNum + 1}/${numSearchBatches}] Searching: ${queryNames}`);
+                onProgress({
+                    stage: 2,
+                    message: `[Search] Batch ${batchNum + 1}/${numSearchBatches}: ${queryNames}`
+                });
+
+                // Run parallel searches
+                const batchPromises = batchQueries.map((query, idx) => {
+                    const pageToUse = searchPages[idx % searchPages.length];
+                    const globalIndex = batchStart + idx;
+                    return searchWithQuery(query, pageToUse, globalIndex);
+                });
+
+                const batchResults = await Promise.all(batchPromises);
+
+                // Process results in order (by queryIndex for priority)
+                batchResults.sort((a, b) => a.queryIndex - b.queryIndex);
+
+                for (const result of batchResults) {
+                    const { query, queryIndex, results: searchResults, error } = result;
+
+                    if (error === 'no_results') {
+                        console.log(`      [${queryIndex + 1}] ✗ "${query.substring(0, 30)}..." - No results`);
+                    } else if (error) {
+                        console.log(`      [${queryIndex + 1}] ✗ "${query.substring(0, 30)}..." - Error: ${error}`);
+                    } else {
+                        console.log(`      [${queryIndex + 1}] ✓ "${query.substring(0, 30)}..." - ${searchResults.length} videos`);
+
+                        // Add results with priority
+                        for (const video of searchResults) {
+                            if (!seenUrls.has(video.url)) {
+                                seenUrls.add(video.url);
+                                allVideos.push({
+                                    ...video,
+                                    sourceQuery: query,
+                                    queryPriority: queryIndex
+                                });
+                            }
+                        }
+                    }
+                }
+
+                queriesCompleted += batchQueries.length;
+
+                // Small delay between batches
+                if (batchNum + 1 < numSearchBatches) {
+                    await new Promise(r => setTimeout(r, 200));
+                }
+            }
+
+            // Close extra search pages (keep main page)
+            for (let i = 1; i < searchPages.length; i++) {
+                try {
+                    await searchPages[i].close();
+                } catch (e) { }
+            }
+
+            // SORT BY QUERY PRIORITY - videos from first (most specific) query come first
+            allVideos.sort((a, b) => a.queryPriority - b.queryPriority);
+
+            results.timings.stage2 = Date.now() - startStage2;
+            const timePerQuery = (results.timings.stage2 / queriesToUse.length).toFixed(0);
+            console.log(`   ✓ Search complete: ${allVideos.length} unique videos from ${queriesToUse.length} queries in ${(results.timings.stage2 / 1000).toFixed(1)}s (${timePerQuery}ms/query avg)`);
+
+            onProgress({
+                stage: 2,
+                message: `[Search] ✓ Complete: ${allVideos.length} videos found in ${(results.timings.stage2 / 1000).toFixed(1)}s`,
+                complete: true
+            });
+
+            if (allVideos.length === 0) {
+                console.log('   No videos found with initial queries. Attempting query expansion...');
+                onProgress({
+                    stage: 2,
+                    message: '[Search] No results with initial queries. Expanding search terms...'
+                });
+
+                // ================================================================
+                // QUERY EXPANSION: Generate broader queries when initial search fails
+                // ================================================================
+                const expansionQueries = this.generateExpansionQueries(analysis, headline, text);
+                
+                if (expansionQueries.length > 0) {
+                    console.log(`   Trying ${expansionQueries.length} expanded queries...`);
                     
-                    // Debug: show first few results
-                    if (searchResults.length > 0) {
-                        console.log(`      First results: ${searchResults.slice(0, 3).map(v => v.title.substring(0, 40)).join(', ')}`);
+                    // Search with expanded queries (use fewer parallel pages to be gentle)
+                    const expansionBatchSize = 3;
+                    const expansionBatches = [];
+                    for (let i = 0; i < expansionQueries.length; i += expansionBatchSize) {
+                        expansionBatches.push(expansionQueries.slice(i, i + expansionBatchSize));
                     }
 
-                    // ADD ALL RESULTS - no filtering here, let text scoring decide
-                    // But mark with queryIndex for priority (first query = most specific)
-                    for (const video of searchResults) {
-                        if (!seenUrls.has(video.url)) {
-                            seenUrls.add(video.url);
-                            allVideos.push({ 
-                                ...video, 
-                                sourceQuery: query,
-                                queryPriority: queryIndex  // 0 = first query = highest priority
+                    for (let batchNum = 0; batchNum < expansionBatches.length; batchNum++) {
+                        const batchQueries = expansionBatches[batchNum];
+                        const batchPromises = batchQueries.map((query, idx) =>
+                            this.searchWithPage(searchPages[0], query, 10)
+                                .then(searchResults => ({ query, queryIndex: idx + 100, results: searchResults }))
+                                .catch(error => ({ query, queryIndex: idx + 100, results: [], error: error.message }))
+                        );
+
+                        const batchResults = await Promise.all(batchPromises);
+
+                        for (const result of batchResults) {
+                            const { query, queryIndex, results: searchResults, error } = result;
+
+                            if (!error && searchResults && searchResults.length > 0) {
+                                console.log(`      [EXPAND] ✓ "${query.substring(0, 30)}..." - ${searchResults.length} videos`);
+
+                                for (const video of searchResults) {
+                                    if (!seenUrls.has(video.url)) {
+                                        seenUrls.add(video.url);
+                                        allVideos.push({
+                                            ...video,
+                                            sourceQuery: query,
+                                            queryPriority: queryIndex
+                                        });
+                                    }
+                                }
+                            } else {
+                                console.log(`      [EXPAND] ✗ "${query.substring(0, 30)}..." - ${error || 'No results'}`);
+                            }
+                        }
+
+                        // Small delay between expansion batches
+                        if (batchNum + 1 < expansionBatches.length) {
+                            await new Promise(r => setTimeout(r, 300));
+                        }
+                    }
+                }
+
+                if (allVideos.length === 0) {
+                    console.log('   No videos found even with expanded queries!');
+                    onProgress({
+                        stage: 2,
+                        message: '[Search] ✗ No videos found even with expanded search terms',
+                        complete: true
+                    });
+                    return results;
+                }
+
+                console.log(`   ✓ Found ${allVideos.length} videos with expanded queries`);
+            }
+
+            // ================================================================
+            // STAGE 2.5: THUMBNAIL VISION ANALYSIS - Filter by visual content
+            // NEW: Analyze thumbnails BEFORE deep analysis for faster, more accurate results
+            // ================================================================
+            console.log('\n[STAGE 2.5] Thumbnail Vision Analysis...');
+            const startStage25 = Date.now();
+
+            // Only process videos that have thumbnail URLs
+            const videosWithThumbnails = allVideos.filter(v => v.thumbnailUrl && v.thumbnailUrl.startsWith('http'));
+            console.log(`   Found ${videosWithThumbnails.length}/${allVideos.length} videos with thumbnails`);
+
+            let thumbnailFilteredVideos = allVideos; // Default: use all if thumbnail analysis fails
+
+            if (videosWithThumbnails.length >= 3) {
+                onProgress({
+                    stage: 2.5,
+                    message: `[Thumbnails] Analyzing ${Math.min(videosWithThumbnails.length, 12)} thumbnails with vision AI...`
+                });
+
+                try {
+                    // Download thumbnails in parallel using https module (fast - they're small images)
+                    const https = require('https');
+                    const http = require('http');
+
+                    const downloadThumbnail = (url) => {
+                        return new Promise((resolve) => {
+                            const protocol = url.startsWith('https') ? https : http;
+                            const request = protocol.get(url, { timeout: 5000 }, (response) => {
+                                if (response.statusCode !== 200) {
+                                    resolve(null);
+                                    return;
+                                }
+                                const chunks = [];
+                                response.on('data', chunk => chunks.push(chunk));
+                                response.on('end', () => resolve(Buffer.concat(chunks)));
+                                response.on('error', () => resolve(null));
                             });
+                            request.on('error', () => resolve(null));
+                            request.on('timeout', () => { request.destroy(); resolve(null); });
+                        });
+                    };
+
+                    const thumbnailsToAnalyze = videosWithThumbnails.slice(0, 12);
+                    const thumbnailDownloads = await Promise.all(
+                        thumbnailsToAnalyze.map(async (video, idx) => {
+                            try {
+                                const buffer = await downloadThumbnail(video.thumbnailUrl);
+                                if (!buffer) return { video, thumbnail: null, error: 'download_failed' };
+                                return { video, thumbnail: buffer, error: null };
+                            } catch (e) {
+                                return { video, thumbnail: null, error: e.message };
+                            }
+                        })
+                    );
+
+                    const successfulDownloads = thumbnailDownloads.filter(d => d.thumbnail !== null);
+                    console.log(`   Downloaded ${successfulDownloads.length}/${thumbnailsToAnalyze.length} thumbnails`);
+
+                    if (successfulDownloads.length >= 3) {
+                        // Build the vision prompt with all thumbnails
+                        const thumbnailPromptParts = [];
+
+                        // Add each thumbnail image
+                        successfulDownloads.forEach((item, idx) => {
+                            thumbnailPromptParts.push({
+                                inlineData: {
+                                    mimeType: 'image/jpeg',
+                                    data: item.thumbnail.toString('base64')
+                                }
+                            });
+                        });
+
+                        // Build search criteria from analysis
+                        const searchCriteria = [];
+                        if (analysis.has_important_person && analysis.person_name) {
+                            searchCriteria.push(`Person: ${analysis.person_name}`);
+                        }
+                        if (analysis.key_visuals && analysis.key_visuals.length > 0) {
+                            searchCriteria.push(`Visuals: ${analysis.key_visuals.join(', ')}`);
+                        }
+                        if (analysis.must_show && analysis.must_show.length > 0) {
+                            searchCriteria.push(`Must show: ${analysis.must_show.join(', ')}`);
+                        }
+                        if (analysis.country) {
+                            searchCriteria.push(`Country/Context: ${analysis.country}`);
+                        }
+
+                        // Add the analysis prompt - PERSON-AWARE RELEVANCE MATCHING
+                        const personModeInstructions = analysis.has_important_person && analysis.person_name
+                            ? `
+═══════════════════════════════════════════════════════════════════════
+⚠️ PERSON MODE ACTIVE - Looking for: ${analysis.person_name}
+═══════════════════════════════════════════════════════════════════════
+We need to find videos showing ${analysis.person_name} ON CAMERA.
+
+SCORING FOR PERSON MODE:
+90-100: ${analysis.person_name} clearly visible (at podium, interview, close-up)
+70-89: ${analysis.person_name} likely present (official setting, press conference)
+40-69: Cannot confirm if ${analysis.person_name} is shown (unclear/distant)
+0-39: DEFINITELY NOT ${analysis.person_name} - shows crowds, protests, OTHER politicians
+
+⚠️ STRICT REJECTION:
+- Crowds or protests → score 10-20 (even if related to ${analysis.person_name})
+- Different politician visible → score 5-15
+- Military/officials without ${analysis.person_name} → score 20-35
+`
+                            : `
+═══════════════════════════════════════════════════════════════════════
+⚠️ FOOTAGE MODE - COUNTRY/LOCATION IS CRITICAL
+═══════════════════════════════════════════════════════════════════════
+REQUIRED COUNTRY/REGION: ${analysis.country || 'Not specified'}
+${analysis.secondary_country ? `SECONDARY COUNTRY: ${analysis.secondary_country}` : ''}
+${analysis.location_keywords ? `SPECIFIC LOCATIONS: ${analysis.location_keywords.join(', ')}` : ''}
+
+THE FOOTAGE MUST BE FROM THE CORRECT COUNTRY. This is the #1 priority.
+
+SCORING FOR FOOTAGE MODE:
+90-100: PERFECT - Clearly from ${analysis.country || 'correct country'}, shows exact topic
+85-89: EXCELLENT - From correct country/region, related content
+70-84: GOOD - Appears to be from correct region, relevant topic
+50-69: UNCERTAIN - Cannot confirm country, but topic seems related
+20-49: WRONG LOCATION - Footage appears to be from a DIFFERENT country
+0-19: COMPLETELY WRONG - Different country AND different topic
+
+⚠️ STRICT REJECTION FOR WRONG COUNTRY:
+- Protest with flags from OTHER countries (Venezuela, Palestine, etc.) → score 5-15
+- European city when segment is about Middle East → score 10-20
+- Asian location when segment is about Americas → score 10-20
+- Generic "international" footage with no clear location → score 30-40
+
+⛔ IMMEDIATE REJECTION - SCORE 0-5:
+- CHINESE/JAPANESE/KOREAN TEXT visible when segment is about Middle East/Iran → score 0-5
+- East Asian faces/performances when looking for Middle Eastern content → score 0-5
+- Russian Cyrillic text when looking for Iran/Middle East → score 5-10
+- WRONG ALPHABET completely mismatched to required country → score 0-10
+
+HOW TO IDENTIFY COUNTRY:
+- Look for FLAGS (national flags indicate country)
+- Look for SIGNS/TEXT - CHECK THE ALPHABET:
+  * Chinese characters (汉字) = China
+  * Arabic script (العربية) = Middle East/Iran
+  * Cyrillic (кириллица) = Russia
+  * Latin = Western countries
+- Look for ARCHITECTURE (Middle Eastern, European, Asian styles)
+- Look for UNIFORMS (police, military with country insignia)
+- Look for LANDMARKS (recognizable buildings, monuments)
+
+EXAMPLE: If segment is about "Iran-US diplomacy":
+✅ ACCEPT: Iranian flags, Tehran streets, US State Department, Persian/Arabic text
+❌ REJECT: Chinese text (中文), Japanese, Korean, Venezuelan flags, European protests
+`;
+
+                        const thumbnailAnalysisPrompt = `You are a news video thumbnail analyzer.
+
+TASK: You will receive ${successfulDownloads.length} IMAGES (thumbnails) numbered 0 to ${successfulDownloads.length - 1}.
+Analyze EACH IMAGE INDIVIDUALLY and give a score for EACH ONE.
+
+NEWS SEGMENT TOPIC: ${analysis.main_subject}
+REQUIRED COUNTRY/REGION: ${analysis.country || 'Any'}
+${analysis.secondary_country ? `SECONDARY COUNTRY: ${analysis.secondary_country}` : ''}
+KEY VISUALS: ${(analysis.key_visuals || []).join(', ') || 'any related imagery'}
+${analysis.has_important_person ? `TARGET PERSON: ${analysis.person_name}` : ''}
+
+The images you receive are in ORDER: Image 0 is first, Image 1 is second, etc.
+${personModeInstructions}
+═══════════════════════════════════════════════════════════════════════
+⚠️ CRITICAL: REJECT PLACEHOLDER/AUDIO-ONLY THUMBNAILS
+═══════════════════════════════════════════════════════════════════════
+IMMEDIATELY SCORE 0-5 if thumbnail shows:
+- AUDIO WAVEFORMS (sound wave visualizations on colored background)
+- Abstract graphics with no real people or scenes
+- Solid color backgrounds with text or logos only
+- Stock graphics, charts, or data visualizations without real footage
+- Blue/dark geometric shapes without actual video content
+
+These are AUDIO-ONLY videos with fake thumbnails. We need REAL VIDEO content!
+═══════════════════════════════════════════════════════════════════════
+
+For each thumbnail, identify:
+1. IS IT REAL VIDEO? (score 0-5 if it's a waveform, abstract graphic, or placeholder)
+2. WHO is visible (specific person names if recognizable)
+3. WHAT is shown (event type, location, context)
+4. WHERE - What country/location does this appear to be? (look for flags, signs, architecture)
+5. Score based on relevance - COUNTRY MATCH IS CRITICAL for footage mode
+
+Respond with JSON:
+{
+  "best_index": <index of best match with REAL VIDEO content>,
+  "best_score": <score 0-100>,
+  "best_reason": "brief reason",
+  "evaluations": [
+    {"index": 0, "score": <0-100>, "is_placeholder": true/false, "shows": "WHO/WHAT is visible", "country_detected": "country or unknown", "person_visible": "name or null"},
+    {"index": 1, "score": <0-100>, "is_placeholder": true/false, "shows": "WHO/WHAT is visible", "country_detected": "country or unknown", "person_visible": "name or null"},
+    ...
+  ],
+  "ranked_indices": [<all indices with score >= 30 AND is_placeholder=false, ordered best to worst>]
+}`;
+
+                        thumbnailPromptParts.push(thumbnailAnalysisPrompt);
+
+                        console.log(`   Sending ${successfulDownloads.length} thumbnails to Gemini Vision...`);
+                        onProgress({
+                            stage: 2.5,
+                            message: `[Thumbnails] Analyzing ${successfulDownloads.length} thumbnails with Gemini Vision...`
+                        });
+
+                        const thumbnailResult = await visionModel.generateContent(thumbnailPromptParts);
+                        const thumbnailText = thumbnailResult.response.text().replace(/```json\n?|```/g, '').trim();
+                        const thumbnailAnalysis = JSON.parse(thumbnailText);
+
+                        console.log(`   ✓ Vision analysis complete`);
+                        console.log(`   Best: Index ${thumbnailAnalysis.best_index} (${thumbnailAnalysis.best_score}%) - ${thumbnailAnalysis.best_reason}`);
+
+                        // Log top evaluations
+                        if (thumbnailAnalysis.evaluations) {
+                            const sorted = [...thumbnailAnalysis.evaluations].sort((a, b) => (b.score || 0) - (a.score || 0));
+                            console.log(`   Top matches:`);
+                            sorted.slice(0, 5).forEach((evalItem, idx) => {
+                                console.log(`      [${evalItem.index ?? idx}] ${evalItem.score}% - ${evalItem.shows || 'N/A'}`);
+                            });
+                        }
+
+                        // Build filtered video list based on ranked indices
+                        thumbnailFilteredVideos = [];
+                        const addedUrls = new Set();
+
+                        // Build evaluation map for quick lookup
+                        const evalMap = new Map();
+                        if (thumbnailAnalysis.evaluations) {
+                            thumbnailAnalysis.evaluations.forEach((evalItem, idx) => {
+                                const evalIdx = evalItem.index !== undefined ? evalItem.index : idx;
+                                evalMap.set(evalIdx, evalItem);
+                            });
+                        }
+
+                        // Use ranked_indices if available, otherwise use evaluations sorted by score
+                        let rankedIndices = thumbnailAnalysis.ranked_indices || [];
+                        if (rankedIndices.length === 0 && thumbnailAnalysis.evaluations) {
+                            // Sort evaluations by score - be more permissive
+                            rankedIndices = thumbnailAnalysis.evaluations
+                                .map((e, i) => ({
+                                    index: e.index !== undefined ? e.index : i,
+                                    score: e.score || 0
+                                }))
+                                .filter(e => e.score >= 30) // Lower threshold - let more videos through
+                                .sort((a, b) => b.score - a.score)
+                                .map(e => e.index);
+                        }
+
+                        // Always put best_index first if it exists
+                        if (thumbnailAnalysis.best_index !== undefined && thumbnailAnalysis.best_index >= 0) {
+                            rankedIndices = [thumbnailAnalysis.best_index, ...rankedIndices.filter(i => i !== thumbnailAnalysis.best_index)];
+                        }
+
+                        // Add videos in ranked order
+                        for (const idx of rankedIndices) {
+                            if (idx >= 0 && idx < successfulDownloads.length) {
+                                const video = successfulDownloads[idx].video;
+                                if (!addedUrls.has(video.url)) {
+                                    const evalItem = evalMap.get(idx);
+
+                                    // Reject placeholders (audio waveforms, abstract graphics)
+                                    if (evalItem && evalItem.is_placeholder === true) {
+                                        console.log(`      [SKIP] Index ${idx} is audio-only/placeholder thumbnail`);
+                                        continue;
+                                    }
+
+                                    // Only reject very low scores
+                                    if (evalItem && evalItem.score < 30) {
+                                        continue;
+                                    }
+
+                                    addedUrls.add(video.url);
+                                    video.thumbnailScore = evalItem?.score || (idx === thumbnailAnalysis.best_index ? thumbnailAnalysis.best_score : 50);
+                                    video.thumbnailShows = evalItem?.shows || thumbnailAnalysis.best_reason || '';
+                                    video.isBestThumbnail = (idx === thumbnailAnalysis.best_index);
+
+                                    thumbnailFilteredVideos.push(video);
+                                }
+                            }
+                        }
+
+                        // If still not enough videos, add more from the original list
+                        if (thumbnailFilteredVideos.length < 3) {
+                            for (let i = 0; i < successfulDownloads.length && thumbnailFilteredVideos.length < 5; i++) {
+                                const video = successfulDownloads[i].video;
+                                if (!addedUrls.has(video.url)) {
+                                    addedUrls.add(video.url);
+                                    video.thumbnailScore = 35; // Default score
+                                    video.thumbnailShows = 'Fallback option';
+                                    thumbnailFilteredVideos.push(video);
+                                }
+                            }
+                        }
+
+                        // If we don't have enough good videos, flag for scroll/more search
+                        if (thumbnailFilteredVideos.length < 3) {
+                            console.log(`   ⚠️ Not enough good matches found (${thumbnailFilteredVideos.length}/3)`);
+                            results.needsMoreSearch = true;
+                        }
+
+                        // Log ranked results
+                        console.log(`   Ranked videos by thumbnail analysis:`);
+                        thumbnailFilteredVideos.slice(0, 5).forEach((v, i) => {
+                            const score = v.thumbnailScore || 0;
+                            const best = v.isBestThumbnail ? ' ⭐ BEST' : '';
+                            const shows = v.thumbnailShows || 'N/A';
+                            console.log(`      [${i + 1}] Score: ${score}${best} - "${v.title?.substring(0, 35)}..." | ${shows}`);
+                        });
+
+                        results.thumbnailAnalysis = thumbnailAnalysis;
+
+                        // CHECK: Fast-track based on score
+                        const bestVideo = thumbnailFilteredVideos[0];
+                        if (bestVideo && bestVideo.thumbnailScore >= 75) {
+                            console.log(`\n   🚀 HIGH CONFIDENCE (${bestVideo.thumbnailScore}%) - Fast-tracking`);
+                            results.fastTrack = true;
+                            results.fastTrackReason = `Thumbnail score: ${bestVideo.thumbnailScore}%`;
+                        } else if (bestVideo && bestVideo.thumbnailScore >= 55) {
+                            console.log(`\n   📋 Medium confidence (${bestVideo.thumbnailScore}%) - Verifying with text`);
+                            results.needsTextVerification = true;
+                        } else {
+                            console.log(`\n   ⚠️ Low confidence (${bestVideo?.thumbnailScore || 0}%) - Full analysis needed`);
                         }
                     }
                 } catch (error) {
-                    console.error(`      Search error: ${error.message}`);
+                    console.error(`   Thumbnail analysis failed: ${error.message}`);
+                    onProgress({
+                        stage: 2.5,
+                        message: `[Thumbnails] Analysis failed: ${error.message?.substring(0, 50)}`,
+                        error: true
+                    });
                 }
-                queryIndex++;
+            } else {
+                console.log(`   Skipping thumbnail analysis - not enough thumbnails`);
             }
-            
-            // SORT BY QUERY PRIORITY - videos from first (most specific) query come first
-            allVideos.sort((a, b) => a.queryPriority - b.queryPriority);
-            console.log(`   Sorted ${allVideos.length} videos by query priority`);
 
-            results.timings.stage2 = Date.now() - startStage2;
-            console.log(`   Total unique videos: ${allVideos.length}`);
-            console.log(`   Time: ${results.timings.stage2}ms`);
+            results.timings.stage25 = Date.now() - startStage25;
+            const filteredCount = thumbnailFilteredVideos.length;
+            const originalCount = allVideos.length;
 
-            if (allVideos.length === 0) {
-                console.log('   No videos found!');
+            console.log(`   ✓ Thumbnail filtering: ${filteredCount} videos selected from ${originalCount} in ${(results.timings.stage25 / 1000).toFixed(1)}s`);
+            onProgress({
+                stage: 2.5,
+                message: `[Thumbnails] ✓ ${filteredCount} relevant videos identified in ${(results.timings.stage25 / 1000).toFixed(1)}s`,
+                complete: true
+            });
+
+            // Check for skip
+            checkSkip();
+
+            // ================================================================
+            // FAST-TRACK: If thumbnail analysis found high-confidence match, skip deep analysis
+            // ================================================================
+            if (results.fastTrack && thumbnailFilteredVideos.length > 0) {
+                const bestVideo = thumbnailFilteredVideos[0];
+                console.log('\n' + '='.repeat(70));
+                console.log('🚀 FAST-TRACK MODE - Skipping deep analysis');
+                console.log('='.repeat(70));
+                console.log(`   Best video: "${bestVideo.title?.substring(0, 50)}..."`);
+                console.log(`   Thumbnail score: ${bestVideo.thumbnailScore}%`);
+                console.log(`   Shows: ${bestVideo.thumbnailShows}`);
+
+                onProgress({
+                    stage: 'fast-track',
+                    message: `🚀 High confidence match found! Score: ${bestVideo.thumbnailScore}%`
+                });
+
+                // Set up the winner directly using thumbnail analysis
+                bestVideo.finalScore = bestVideo.thumbnailScore;
+                bestVideo.textScore = { score: bestVideo.thumbnailScore };
+                bestVideo.visualAnalysis = {
+                    relevance_score: bestVideo.thumbnailScore,
+                    recommendation: 'ACCEPT',
+                    reason: bestVideo.thumbnailShows
+                };
+
+                // CRITICAL FIX: Fast Track skips deep analysis, so we MUST extract mandatoryCredit manually
+                // REVERTED per user request: Skipping metadata extraction to preserve maximum speed.
+                // Note: This means mandatoryCredit will be missing for Fast Track videos.
+                console.log(`\n   🔎 FAST-TRACK: Skipping metadata extraction (Speed Priority)`);
+
+                // Prepare final ranking with just the top videos from thumbnail analysis
+                const finalRanking = thumbnailFilteredVideos.slice(0, 5).map((v, idx) => ({
+                    ...v,
+                    finalScore: v.thumbnailScore || 50,
+                    textScoreNum: v.thumbnailScore || 50,
+                    visualScore: v.thumbnailScore || 50,
+                    matchBonus: 0,
+                    matchPenalty: 0
+                }));
+
+                results.videos = finalRanking;
+
+                // ANTI-REPEAT: Select best video that wasn't recently used
+                results.winner = this.selectBestVideoAvoidingRepeats(finalRanking);
+                if (results.winner) {
+                    this.markVideoAsUsed(results.winner.url);
+                }
+
+                results.timings.total = Date.now() - startTotal;
+
+                console.log(`\nFAST-TRACK complete in ${(results.timings.total / 1000).toFixed(1)}s`);
+                console.log(`Winner: "${results.winner?.title?.substring(0, 50)}..." (Score: ${results.winner?.finalScore})`);
+
+                onProgress({
+                    stage: 6,
+                    message: `Winner: Score ${results.winner?.finalScore} | "${results.winner?.title?.substring(0, 35)}..."`,
+                    winner: {
+                        title: results.winner?.title?.substring(0, 50),
+                        finalScore: results.winner?.finalScore,
+                        thumbnailScore: results.winner?.thumbnailScore
+                    }
+                });
+
+                return results;
+            }
+
+            // ================================================================
+            // STAGE 2.7: QUICK TEXT VERIFICATION (when Vision score is medium)
+            // Compare segment text with video titles to verify relevance
+            // ================================================================
+            if (results.needsTextVerification && thumbnailFilteredVideos.length > 0) {
+                console.log('\n[STAGE 2.7] Quick Text Verification...');
+                const startStage27 = Date.now();
+
+                // Extract key terms from headline and text for comparison
+                const segmentKeywords = (headline + ' ' + text)
+                    .toLowerCase()
+                    .replace(/[^a-z0-9\s]/g, ' ')
+                    .split(/\s+/)
+                    .filter(w => w.length > 3)
+                    .slice(0, 20);
+
+                // Score each video by title keyword matching
+                for (const video of thumbnailFilteredVideos) {
+                    const titleLower = (video.title || '').toLowerCase();
+                    let keywordMatches = 0;
+                    for (const keyword of segmentKeywords) {
+                        if (titleLower.includes(keyword)) {
+                            keywordMatches++;
+                        }
+                    }
+                    video.textMatchScore = Math.round((keywordMatches / Math.min(segmentKeywords.length, 10)) * 100);
+
+                    // Combine thumbnail score with text match
+                    const combinedScore = Math.round(video.thumbnailScore * 0.6 + video.textMatchScore * 0.4);
+                    video.thumbnailScore = combinedScore;
+
+                    console.log(`   [${video.textMatchScore}% text match] "${video.title?.substring(0, 40)}..."`);
+                }
+
+                // Re-sort by combined score
+                thumbnailFilteredVideos.sort((a, b) => b.thumbnailScore - a.thumbnailScore);
+
+                // Check if top video now has high enough score
+                const topVideo = thumbnailFilteredVideos[0];
+                if (topVideo && topVideo.thumbnailScore >= 70) {
+                    console.log(`\n   🚀 Text verification passed (${topVideo.thumbnailScore}%) - Fast-tracking`);
+                    results.fastTrack = true;
+                    results.fastTrackReason = `Combined score: ${topVideo.thumbnailScore}%`;
+                }
+
+                results.timings.stage27 = Date.now() - startStage27;
+                console.log(`   Completed in ${results.timings.stage27}ms`);
+            }
+
+            // If fast-track after text verification, return early
+            if (results.fastTrack && thumbnailFilteredVideos.length > 0) {
+                const bestVideo = thumbnailFilteredVideos[0];
+
+                bestVideo.finalScore = bestVideo.thumbnailScore;
+                bestVideo.textScore = { score: bestVideo.thumbnailScore };
+                bestVideo.visualAnalysis = {
+                    relevance_score: bestVideo.thumbnailScore,
+                    recommendation: 'ACCEPT',
+                    reason: bestVideo.thumbnailShows
+                };
+
+                const finalRanking = thumbnailFilteredVideos.slice(0, 5).map((v, idx) => ({
+                    ...v,
+                    finalScore: v.thumbnailScore || 50,
+                    textScoreNum: v.thumbnailScore || 50,
+                    visualScore: v.thumbnailScore || 50,
+                    matchBonus: 0,
+                    matchPenalty: 0
+                }));
+
+                results.videos = finalRanking;
+                results.winner = finalRanking[0];
+                results.timings.total = Date.now() - startTotal;
+
+                console.log(`\nFAST-TRACK complete in ${(results.timings.total / 1000).toFixed(1)}s`);
+                console.log(`Winner: "${results.winner.title?.substring(0, 50)}..." (Score: ${results.winner.finalScore})`);
+
+                onProgress({
+                    stage: 6,
+                    message: `Winner: Score ${results.winner.finalScore} | "${results.winner.title?.substring(0, 35)}..."`,
+                    winner: {
+                        title: results.winner.title?.substring(0, 50),
+                        finalScore: results.winner.finalScore,
+                        thumbnailScore: results.winner.thumbnailScore
+                    }
+                });
+
                 return results;
             }
 
             // ================================================================
             // STAGE 3: DEEP VIDEO ANALYSIS - Extract metadata + screenshots
+            // Only runs if no high-confidence thumbnail match was found
             // ================================================================
-            console.log('\n[STAGE 3] Deep Video Analysis...');
-            onProgress({ stage: 3, message: `Extracting metadata from ${Math.min(allVideos.length, maxVideosToAnalyze)} videos...` });
+            console.log('\n[STAGE 3] Deep Video Analysis (PARALLEL MODE - 3 pages)...');
             const startStage3 = Date.now();
 
-            const videosToAnalyze = allVideos.slice(0, maxVideosToAnalyze);
+            // Use thumbnail-filtered videos instead of all videos
+            const videosToAnalyze = thumbnailFilteredVideos.slice(0, maxVideosToAnalyze);
+            const PARALLEL_PAGES = 5; // Increased from 3 to 5 for faster analysis
+            const totalVideos = videosToAnalyze.length;
 
-            for (let i = 0; i < videosToAnalyze.length; i++) {
-                const video = videosToAnalyze[i];
+            // Send clear initial message
+            onProgress({
+                stage: 3,
+                message: `[Deep Analysis] Extracting metadata from ${totalVideos} videos using ${PARALLEL_PAGES} parallel pages...`
+            });
+
+            // Helper function to analyze a single video on a given page
+            // Returns result WITHOUT sending progress (we batch progress updates)
+            const analyzeVideoOnPage = async (video, pageInstance, videoIndex) => {
                 const shortTitle = (video.title || '').substring(0, 40);
-                console.log(`   [${i + 1}/${videosToAnalyze.length}] ${shortTitle}...`);
-                onProgress({ 
-                    stage: 3, 
-                    message: `[${i + 1}/${videosToAnalyze.length}] Extracting: "${shortTitle}..."`,
-                    current: i + 1,
-                    total: videosToAnalyze.length
-                });
 
                 try {
-                    await page.goto(video.url, { waitUntil: 'networkidle', timeout: 25000 });
-                    await page.waitForSelector('h1', { timeout: 5000 }).catch(() => {});
-                    await page.waitForTimeout(800);
+                    // OPTIMIZED: Use domcontentloaded instead of networkidle (faster)
+                    await pageInstance.goto(video.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+                    await pageInstance.waitForSelector('h1', { timeout: 5000 }).catch(() => { });
+                    // OPTIMIZED: Reduced from 800ms to 400ms
+                    await pageInstance.waitForTimeout(400);
 
-                    // Expand Shot list section
-                    const shotListExpanded = await page.evaluate(() => {
+                    // Expand collapsible sections (Shot list AND Meta data)
+                    // CRITICAL: "Mandatory credit" is inside "Meta data" which is collapsed by default
+                    const expandedSections = await pageInstance.evaluate(() => {
+                        const expanded = { shotList: false, metaData: false };
                         const allElements = document.querySelectorAll('*');
+
                         for (const el of allElements) {
-                            if (el.childNodes.length === 1 && el.textContent.trim() === 'Shot list') {
-                                let sibling = el.nextElementSibling;
-                                if (sibling && sibling.tagName === 'BUTTON') {
-                                    sibling.click();
-                                    return true;
-                                }
-                                const parent = el.parentElement;
-                                if (parent) {
-                                    sibling = parent.nextElementSibling;
+                            if (el.childNodes.length === 1) {
+                                const text = el.textContent.trim();
+
+                                // Expand "Shot list" section
+                                if (text === 'Shot list' && !expanded.shotList) {
+                                    let sibling = el.nextElementSibling;
                                     if (sibling && sibling.tagName === 'BUTTON') {
                                         sibling.click();
-                                        return true;
+                                        expanded.shotList = true;
+                                    } else {
+                                        const parent = el.parentElement;
+                                        if (parent) {
+                                            sibling = parent.nextElementSibling;
+                                            if (sibling && sibling.tagName === 'BUTTON') {
+                                                sibling.click();
+                                                expanded.shotList = true;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Expand "Meta data" section (contains Mandatory credit)
+                                if (text === 'Meta data' && !expanded.metaData) {
+                                    let sibling = el.nextElementSibling;
+                                    if (sibling && sibling.tagName === 'BUTTON') {
+                                        sibling.click();
+                                        expanded.metaData = true;
+                                    } else {
+                                        const parent = el.parentElement;
+                                        if (parent) {
+                                            sibling = parent.nextElementSibling;
+                                            if (sibling && sibling.tagName === 'BUTTON') {
+                                                sibling.click();
+                                                expanded.metaData = true;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                        return false;
+                        return expanded;
                     });
-                    
-                    if (shotListExpanded) {
-                        console.log(`      Shot list expanded`);
-                        await page.waitForTimeout(500);
+
+                    if (expandedSections.shotList || expandedSections.metaData) {
+                        // Wait for accordion animations
+                        await pageInstance.waitForTimeout(300);
+                        console.log(`[VioryDownloader] Expanded sections: Shot list=${expandedSections.shotList}, Meta data=${expandedSections.metaData}`);
                     }
 
-                    // Extract metadata - EXACT COPY FROM TEST
-                    const metadata = await page.evaluate(() => {
+                    // Extract metadata - EXACT SAME LOGIC (unchanged for result consistency)
+                    const metadata = await pageInstance.evaluate(() => {
                         const result = {
                             title: '',
                             videoInfo: '',
@@ -1380,11 +2069,11 @@ Answer with JSON only:
                         // VIDEO INFO
                         const titleEndIndex = bodyText.indexOf(result.title) + result.title.length;
                         const shotListIndex = bodyText.indexOf('Shot list');
-                        
+
                         if (titleEndIndex > 0) {
                             let infoEndIndex = shotListIndex > titleEndIndex ? shotListIndex : bodyText.length;
                             infoEndIndex = Math.min(infoEndIndex, titleEndIndex + 4000);
-                            
+
                             let videoInfoRaw = bodyText.substring(titleEndIndex, infoEndIndex);
                             videoInfoRaw = videoInfoRaw
                                 .replace(/^[\s\S]*?(Videos|Download video)[\s\n]*/i, '')
@@ -1392,15 +2081,15 @@ Answer with JSON only:
                                 .replace(/^(En|Videos|Live events|Pricing|About|Search)[\s\n]*/gm, '')
                                 .replace(/FOR SUBSCRIBERS ONLY/gi, '')
                                 .trim();
-                            
+
                             const sentences = videoInfoRaw.split(/\n+/).filter(s => {
                                 const trimmed = s.trim();
-                                return trimmed.length > 50 && 
-                                       !trimmed.startsWith('©') &&
-                                       !trimmed.includes('cookie') &&
-                                       !trimmed.includes('Terms of');
+                                return trimmed.length > 50 &&
+                                    !trimmed.startsWith('©') &&
+                                    !trimmed.includes('cookie') &&
+                                    !trimmed.includes('Terms of');
                             });
-                            
+
                             result.videoInfo = sentences.slice(0, 6).join('\n\n').substring(0, 2500);
                         }
 
@@ -1421,11 +2110,9 @@ Answer with JSON only:
                         if (durMatch) result.duration = durMatch[1];
 
                         // MANDATORY CREDIT
-                        // Extract only the credit name, not usage restrictions
                         const creditMatch = bodyText.match(/[Mm]andatory\s*credit[:\s]+([^\n]+)/);
                         if (creditMatch && creditMatch[1]) {
                             let credit = creditMatch[1].trim();
-                            // Remove everything after common separators
                             credit = credit.replace(/[;].*$/, '').trim();
                             credit = credit.replace(/\/[A-Z].*$/i, '').trim();
                             credit = credit.replace(/\s*\/-.*$/, '').trim();
@@ -1434,7 +2121,12 @@ Answer with JSON only:
                             credit = credit.replace(/[.,;:\/]+$/, '').trim();
                             if (credit.length >= 3 && credit.length <= 100) {
                                 result.mandatoryCredit = credit;
+                                console.log('[VioryDownloader] DEBUG: Analyzed credit: "' + credit + '"');
+                            } else {
+                                console.log('[VioryDownloader] DEBUG: Rejected credit "' + credit + '" (length ' + credit.length + ')');
                             }
+                        } else {
+                            console.log('[VioryDownloader] DEBUG: No mandatory credit pattern match. Body snippet: ' + bodyText.substring(0, 500));
                         }
 
                         return result;
@@ -1444,7 +2136,7 @@ Answer with JSON only:
 
                     // Capture screenshot
                     try {
-                        const videoArea = await page.$('video, [class*="player"], [class*="video-container"], main img');
+                        const videoArea = await pageInstance.$('video, [class*="player"], [class*="video-container"], main img');
                         if (videoArea) {
                             const box = await videoArea.boundingBox();
                             if (box && box.width > 200) {
@@ -1452,29 +2144,118 @@ Answer with JSON only:
                             }
                         }
                         if (!video.screenshot) {
-                            video.screenshot = await page.screenshot({
+                            video.screenshot = await pageInstance.screenshot({
                                 type: 'png',
                                 clip: { x: 300, y: 80, width: 900, height: 500 }
                             });
                         }
-                        console.log(`      Screenshot captured`);
                     } catch (e) {
-                        console.log(`      Screenshot failed`);
+                        // Screenshot failed silently - will be logged in batch summary
                     }
 
-                    console.log(`      VideoInfo: ${video.videoInfo ? `${video.videoInfo.length} chars` : 'empty'}`);
-                    console.log(`      ShotList: ${video.shotList ? `${video.shotList.length} chars` : 'empty'}`);
-                    if (video.shotList) {
-                        console.log(`      Shot preview: "${video.shotList.substring(0, 100)}..."`);
-                    }
+                    return { success: true, video };
 
                 } catch (error) {
-                    console.error(`      Error: ${error.message}`);
+                    return { success: false, video, error: error.message };
+                }
+            };
+
+            // Create additional pages for parallel analysis
+            const analysisPages = [page]; // Reuse main page as first
+            try {
+                for (let i = 1; i < PARALLEL_PAGES; i++) {
+                    const newPage = await this.context.newPage();
+                    analysisPages.push(newPage);
+                }
+                console.log(`   Created ${PARALLEL_PAGES} parallel analysis pages`);
+            } catch (e) {
+                console.warn(`   Could not create extra pages, falling back to sequential: ${e.message}`);
+            }
+
+            // Process videos in parallel batches with clear progress
+            let videosCompleted = 0;
+            const numBatches = Math.ceil(totalVideos / analysisPages.length);
+
+            for (let batchNum = 0; batchNum < numBatches; batchNum++) {
+                // Check for skip before each batch
+                checkSkip();
+
+                const batchStart = batchNum * analysisPages.length;
+                const batchVideos = videosToAnalyze.slice(batchStart, batchStart + analysisPages.length);
+                const batchSize = batchVideos.length;
+
+                // Log batch with video titles
+                const videoTitles = batchVideos.map(v => `"${(v.title || '').substring(0, 25)}"`).join(', ');
+                console.log(`   [Batch ${batchNum + 1}/${numBatches}] Analyzing: ${videoTitles}`);
+                onProgress({
+                    stage: 3,
+                    message: `[Deep Analysis] Batch ${batchNum + 1}/${numBatches}: ${videoTitles}`,
+                    current: videosCompleted,
+                    total: totalVideos
+                });
+
+                // Run parallel analysis for this batch
+                const batchPromises = batchVideos.map((video, idx) => {
+                    const pageToUse = analysisPages[idx % analysisPages.length];
+                    const globalIndex = batchStart + idx;
+                    return analyzeVideoOnPage(video, pageToUse, globalIndex);
+                });
+
+                const batchResults = await Promise.all(batchPromises);
+
+                // Log batch results AFTER all complete (ordered)
+                batchResults.forEach((result, idx) => {
+                    const globalIndex = batchStart + idx;
+                    const video = batchVideos[idx];
+                    const shortTitle = (video.title || '').substring(0, 35);
+                    const hasInfo = video.videoInfo ? `${video.videoInfo.length}ch` : '0';
+                    const hasShot = video.shotList ? `${video.shotList.length}ch` : '0';
+                    const hasScreenshot = video.screenshot ? '✓' : '✗';
+
+                    if (result.success) {
+                        console.log(`      [${globalIndex + 1}/${totalVideos}] ✓ "${shortTitle}..." | Info:${hasInfo} Shot:${hasShot} Img:${hasScreenshot}`);
+                    } else {
+                        console.log(`      [${globalIndex + 1}/${totalVideos}] ✗ "${shortTitle}..." | Error: ${result.error}`);
+                    }
+                });
+
+                videosCompleted += batchSize;
+
+                // Send progress update after batch completes
+                onProgress({
+                    stage: 3,
+                    message: `[Deep Analysis] Completed ${videosCompleted}/${totalVideos} videos`,
+                    current: videosCompleted,
+                    total: totalVideos
+                });
+
+                // Small delay between batches to avoid any rate limiting
+                if (batchNum + 1 < numBatches) {
+                    await new Promise(r => setTimeout(r, 250));
+                }
+            }
+
+            // Close extra pages (keep main page)
+            for (let i = 1; i < analysisPages.length; i++) {
+                try {
+                    await analysisPages[i].close();
+                } catch (e) {
+                    // Ignore close errors
                 }
             }
 
             results.timings.stage3 = Date.now() - startStage3;
-            console.log(`   Time: ${results.timings.stage3}ms`);
+            const timePerVideo = (results.timings.stage3 / totalVideos).toFixed(0);
+            console.log(`   ✓ Deep Analysis complete: ${totalVideos} videos in ${(results.timings.stage3 / 1000).toFixed(1)}s (${timePerVideo}ms/video avg)`);
+
+            onProgress({
+                stage: 3,
+                message: `[Deep Analysis] ✓ Complete: ${totalVideos} videos analyzed in ${(results.timings.stage3 / 1000).toFixed(1)}s`,
+                complete: true
+            });
+
+            // Check for user skip request before scoring
+            checkSkip();
 
             // ================================================================
             // STAGE 4: TEXT SCORING - EXACT COPY FROM TEST
@@ -1497,7 +2278,7 @@ Answer with JSON only:
                 // ============================================
                 // FOOTAGE/CONTEXT MATCHING (when no specific person)
                 // ============================================
-                
+
                 // MAIN SUBJECT MATCH - Most important for footage
                 if (analysis.main_subject && !analysis.has_important_person) {
                     const subjectWords = analysis.main_subject.toLowerCase().split(' ').filter(w => w.length > 3);
@@ -1573,7 +2354,7 @@ Answer with JSON only:
                     economy: ['trade', 'tariff', 'economy', 'market', 'stock', 'inflation', 'gdp', 'export', 'import', 'deal', 'agreement', 'summit'],
                     politics: ['election', 'vote', 'parliament', 'congress', 'senate', 'minister', 'president', 'government', 'policy', 'law', 'bill']
                 };
-                
+
                 // Check all context categories
                 let contextBonus = 0;
                 Object.values(contextKeywords).flat().forEach(kw => {
@@ -1599,13 +2380,13 @@ Answer with JSON only:
                 if (analysis.has_important_person && analysis.person_name) {
                     const personNameLower = analysis.person_name.toLowerCase();
                     const nameParts = personNameLower.split(' ').filter(p => p.length >= 2); // Allow 2+ chars (for "He")
-                    
+
                     // Check for FULL name match first (highest priority)
                     if (content.includes(personNameLower)) {
                         score += 60; // HUGE bonus for full name match
                         personMatchInText = true;
                         console.log(`      [PERSONA EXACTA] "${analysis.person_name}" encontrado completo`);
-                    } 
+                    }
                     // Check for surname/lastname match (usually last part of name)
                     else if (nameParts.length > 1) {
                         const lastName = nameParts[nameParts.length - 1]; // Last part is usually surname
@@ -1624,7 +2405,7 @@ Answer with JSON only:
                             console.log(`      [PERSONA PARCIAL] "${significantPart}" encontrado en video`);
                         }
                     }
-                    
+
                     // PENALTY if looking for specific person but video doesn't have them
                     if (!personMatchInText) {
                         score -= 20; // Penalty for missing the required person
@@ -1644,95 +2425,190 @@ Answer with JSON only:
 
             // Send top 3 scores to UI
             const top3 = videosToAnalyze.slice(0, 3);
-            onProgress({ 
-                stage: 4, 
+            onProgress({
+                stage: 4,
                 message: `Top scores: ${top3.map(v => v.textScore.score).join(', ')} | Best: "${(top3[0]?.title || '').substring(0, 35)}..."`,
                 topScores: top3.map(v => ({ title: v.title?.substring(0, 30), score: v.textScore.score }))
             });
 
             // ================================================================
             // STAGE 5: VISUAL VALIDATION with Gemini Vision
-            // SIMPLIFIED: Direct person check or footage relevance
+            // Analyzes each video individually for maximum accuracy
+            // Uses parallel processing (2 at a time) for speed
             // ================================================================
             console.log('\n[STAGE 5] Visual Validation with Gemini Vision...');
-            
-            // Check if we need to match a specific person (confirmed in segment)
-            const requiresPersonMatch = results.segmentPersonConfirmed === true && analysis.person_name;
+
+            // Check if we need to match a specific person
+            // Use PERSONA mode if:
+            // 1. AI detected an important person in the segment (analysis.has_important_person)
+            // 2. OR segment frame confirmed the person (segmentPersonConfirmed)
+            const requiresPersonMatch = (analysis.has_important_person === true || results.segmentPersonConfirmed === true) && analysis.person_name;
             const personToMatch = analysis.person_name;
-            
+            const personConfirmedByFrame = results.segmentPersonConfirmed === true;
+
             if (requiresPersonMatch) {
-                console.log(`   [MODO PERSONA] Buscando videos que muestren a: ${personToMatch}`);
+                if (personConfirmedByFrame) {
+                    console.log(`   [MODO PERSONA - CONFIRMADO] Buscando videos que muestren a: ${personToMatch} (confirmado en frame)`);
+                } else {
+                    console.log(`   [MODO PERSONA - AI] Buscando videos que muestren a: ${personToMatch} (detectado por AI)`);
+                }
             } else {
                 console.log(`   [MODO FOOTAGE] Buscando videos relevantes al tema`);
             }
-            
-            onProgress({ 
-                stage: 5, 
-                message: requiresPersonMatch 
-                    ? `Buscando B-roll con ${personToMatch}...`
-                    : `Analizando ${topNForVisualValidation} videos por relevancia...`,
+
+            const startStage5 = Date.now();
+            const topVideos = videosToAnalyze.slice(0, topNForVisualValidation);
+
+            console.log(`   Analizando ${topVideos.length} videos por relevancia...`);
+            onProgress({
+                stage: 5,
+                message: `[Vision] Analyzing ${topVideos.length} videos...`,
                 matchMode: requiresPersonMatch ? 'person' : 'footage',
                 personToMatch: personToMatch
             });
-            const startStage5 = Date.now();
 
-            const topVideos = videosToAnalyze.slice(0, topNForVisualValidation);
-            let analyzedCount = 0;
+            // Helper function to build the vision prompt for a single video
+            const buildVisionPrompt = (video) => {
+                if (requiresPersonMatch) {
+                    // Build a list of common "wrong persons" to help the model
+                    const wrongPersonExamples = {
+                        'trump': ['Biden', 'Putin', 'Xi Jinping', 'Macron', 'Zelensky', 'Iranian officials', 'Chinese officials', 'European leaders', 'protesters'],
+                        'putin': ['Zelensky', 'Biden', 'Trump', 'NATO officials', 'Ukrainian soldiers', 'European leaders', 'protesters'],
+                        'netanyahu': ['Palestinian officials', 'Hamas leaders', 'Iranian officials', 'protesters', 'UN officials', 'Biden'],
+                        'biden': ['Trump', 'Putin', 'Xi Jinping', 'Republicans', 'protesters'],
+                        'zelensky': ['Putin', 'Russian officials', 'soldiers', 'refugees'],
+                        'xi': ['Biden', 'Trump', 'Taiwanese officials', 'protesters']
+                    };
 
-            for (let vi = 0; vi < topVideos.length; vi++) {
-                const video = topVideos[vi];
-                
-                if (!video.screenshot) {
-                    video.visualAnalysis = { success: false };
-                    onProgress({ 
-                        stage: 5, 
-                        message: `[${vi + 1}/${topVideos.length}] Sin screenshot`,
-                        videoTitle: video.title?.substring(0, 30)
-                    });
-                    continue;
-                }
+                    const personLower = personToMatch.toLowerCase();
+                    let wrongPersons = ['other politicians', 'protesters', 'crowds', 'officials'];
 
-                const shortTitle = (video.title || '').substring(0, 35);
-                console.log(`   Validating: ${shortTitle}...`);
-                onProgress({ 
-                    stage: 5, 
-                    message: `[${vi + 1}/${topVideos.length}] ${requiresPersonMatch ? `Buscando a ${personToMatch}` : 'Verificando relevancia'}...`,
-                    videoTitle: shortTitle,
-                    current: vi + 1,
-                    total: topVideos.length
-                });
+                    // Find specific wrong persons based on target
+                    for (const [key, examples] of Object.entries(wrongPersonExamples)) {
+                        if (personLower.includes(key)) {
+                            wrongPersons = examples;
+                            break;
+                        }
+                    }
 
-                try {
-                    let visionPrompt;
-                    
-                    if (requiresPersonMatch) {
-                        // SIMPLE DIRECT QUESTION: Is this person in the video?
-                        visionPrompt = `Look at this video screenshot.
+                    // Determine expected country/setting for this person
+                    const personCountryMap = {
+                        'trump': { country: 'USA', flags: 'American flag', settings: 'White House, US Capitol, Mar-a-Lago' },
+                        'biden': { country: 'USA', flags: 'American flag', settings: 'White House, US Capitol' },
+                        'putin': { country: 'Russia', flags: 'Russian flag', settings: 'Kremlin, Russian government buildings' },
+                        'zelensky': { country: 'Ukraine', flags: 'Ukrainian flag', settings: 'Kyiv, Ukrainian government' },
+                        'netanyahu': { country: 'Israel', flags: 'Israeli flag', settings: 'Knesset, Israeli government' },
+                        'macron': { country: 'France', flags: 'French flag', settings: 'Elysee Palace' },
+                        'xi': { country: 'China', flags: 'Chinese flag', settings: 'Great Hall of the People, Beijing' }
+                    };
 
-QUESTION: Does this video show "${personToMatch}"?
+                    let expectedCountry = 'USA';
+                    let expectedFlags = 'country flags matching the person';
+                    let expectedSettings = 'official government setting';
 
-Video title: ${video.title}
-Video description: ${(video.videoInfo || '').substring(0, 200)}
+                    for (const [key, info] of Object.entries(personCountryMap)) {
+                        if (personLower.includes(key)) {
+                            expectedCountry = info.country;
+                            expectedFlags = info.flags;
+                            expectedSettings = info.settings;
+                            break;
+                        }
+                    }
 
-Answer with JSON only:
+                    return `═══════════════════════════════════════════════════════════════════════
+PERSON IDENTIFICATION TASK
+═══════════════════════════════════════════════════════════════════════
+
+TARGET PERSON: "${personToMatch}"
+EXPECTED COUNTRY: ${expectedCountry}
+EXPECTED SETTING: ${expectedSettings}
+${analysis.person_description ? `DESCRIPTION: ${analysis.person_description}` : ''}
+
+Look at this video screenshot and answer TWO things:
+1. Is ${personToMatch} VISIBLE in this image?
+2. Are the FLAGS/SETTING correct for ${personToMatch}? (Should be ${expectedFlags})
+
+═══════════════════════════════════════════════════════════════════════
+⚠️ FLAG/COUNTRY CHECK - VERY IMPORTANT:
+═══════════════════════════════════════════════════════════════════════
+If looking for ${personToMatch}, the background should show ${expectedFlags}.
+
+WRONG FLAGS = WRONG VIDEO, even if a politician is visible:
+- Slovak flag (white-blue-red with coat of arms) ≠ USA
+- EU flag (blue with yellow stars) ≠ USA  
+- Any European country flag ≠ USA (unless topic is about Europe)
+- Middle Eastern flags ≠ USA
+
+═══════════════════════════════════════════════════════════════════════
+IDENTIFICATION RULES:
+═══════════════════════════════════════════════════════════════════════
+
+✅ ACCEPT (score 85-100):
+- ${personToMatch} is clearly visible AND recognizable
+- Background shows correct flags/setting (${expectedFlags})
+- Close-up, medium shot, or at podium/desk
+
+⚠️ REVIEW (score 50-70):
+- ${personToMatch} might be present but image is unclear
+- OR correct person but flags/setting not visible
+
+❌ REJECT (score 0-30):
+- Shows DIFFERENT politician (${wrongPersons.slice(0, 4).join(', ')})
+- Shows WRONG FLAGS (European, Asian, Middle Eastern when expecting ${expectedFlags})
+- Shows crowd/protesters
+- Shows military/officials without ${personToMatch}
+- No people visible, just buildings/flags/graphics
+
+═══════════════════════════════════════════════════════════════════════
+VIDEO CONTEXT:
+═══════════════════════════════════════════════════════════════════════
+Title: ${video.title}
+
+═══════════════════════════════════════════════════════════════════════
+RESPOND WITH JSON ONLY:
+═══════════════════════════════════════════════════════════════════════
 {
-  "shows_person": true/false,
-  "person_identified": "Name of person you see (or 'unknown' or 'no person visible')",
-  "confidence": 0.0-1.0,
-  "relevance_score": 0-100
-}
+  "shows_target_person": true/false,
+  "person_identified": "WHO is actually visible? Be specific - name them if recognizable",
+  "identification_confidence": 0.0-1.0,
+  "flags_visible": "What flags are visible in the image? (be specific)",
+  "flags_match_expected": true/false,
+  "wrong_country_flags": "Country name if wrong flags visible, else null",
+  "is_crowd_or_protest": true/false,
+  "is_different_politician": true/false,
+  "different_politician_name": "Name if showing different politician, else null",
+  "relevance_score": 0-100,
+  "recommendation": "ACCEPT/REVIEW/REJECT",
+  "reason": "One sentence explanation"
+}`;
+                } else {
+                    // FOOTAGE MODE - Country/Location is CRITICAL
+                    // Build list of commonly confused countries
+                    const confusedCountries = {
+                        'israel': ['UAE', 'Abu Dhabi', 'Dubai', 'Qatar', 'Saudi Arabia', 'Jordan', 'Egypt'],
+                        'iran': ['UAE', 'Iraq', 'Saudi Arabia', 'Turkey', 'Pakistan'],
+                        'usa': ['Canada', 'UK', 'Australia', 'European countries'],
+                        'russia': ['Ukraine', 'Belarus', 'Kazakhstan', 'Eastern European countries'],
+                        'china': ['Japan', 'South Korea', 'Taiwan', 'Hong Kong', 'Singapore']
+                    };
 
-SCORING:
-- If you clearly see ${personToMatch} → relevance_score: 90-100
-- If you see someone who might be ${personToMatch} → relevance_score: 70-89
-- If you see a different person → relevance_score: 20-40
-- If no person visible but related content → relevance_score: 40-60`;
-                    } else {
-                        // FOOTAGE RELEVANCE CHECK - More detailed and context-aware
-                        visionPrompt = `You are an expert news B-roll matcher. Analyze if this video is relevant for the news topic.
+                    const requiredCountry = (analysis.country || '').toLowerCase();
+                    let wrongCountryExamples = [];
+                    for (const [country, confused] of Object.entries(confusedCountries)) {
+                        if (requiredCountry.includes(country)) {
+                            wrongCountryExamples = confused;
+                            break;
+                        }
+                    }
+
+                    return `═══════════════════════════════════════════════════════════════════════
+FOOTAGE RELEVANCE ANALYSIS - COUNTRY VERIFICATION IS CRITICAL
+═══════════════════════════════════════════════════════════════════════
 
 NEWS TOPIC: ${analysis.main_subject}
-COUNTRY/REGION: ${analysis.country || 'Not specified'}
+REQUIRED COUNTRY: ${analysis.country || 'Not specified'}
+${analysis.secondary_country ? `SECONDARY COUNTRY: ${analysis.secondary_country}` : ''}
+${analysis.location_keywords ? `SPECIFIC LOCATIONS: ${(analysis.location_keywords || []).join(', ')}` : ''}
 KEY VISUALS NEEDED: ${analysis.key_visuals?.join(', ') || 'General footage'}
 MUST SHOW: ${analysis.must_show?.join(', ') || 'Related content'}
 AVOID: ${analysis.avoid?.join(', ') || 'Nothing specific'}
@@ -1742,97 +2618,203 @@ Title: ${video.title}
 Description: ${(video.videoInfo || '').substring(0, 400)}
 Shot list: ${(video.shotList || '').substring(0, 300)}
 
-SCORING GUIDE FOR B-ROLL FOOTAGE:
-- 85-100: PERFECT MATCH - Shows exactly what the news topic is about (same event, same location, same context)
-- 70-84: STRONG MATCH - Shows very related content (same type of event, same country, similar context)
-- 55-69: MODERATE MATCH - Shows somewhat related content (same general topic or region)
-- 40-54: WEAK MATCH - Only loosely connected (same broad category)
-- 0-39: NO MATCH - Different topic, wrong country, or unrelated content
+═══════════════════════════════════════════════════════════════════════
+⚠️ CRITICAL: COUNTRY/LOCATION VERIFICATION
+═══════════════════════════════════════════════════════════════════════
 
-IMPORTANT CONTEXT RULES:
-- Military footage (strikes, convoys, weapons) → must match the SPECIFIC conflict/country
-- Disaster footage (earthquake, flood) → must match the SPECIFIC event/location
-- Political footage (summit, speech) → must match the SPECIFIC event/participants
-- Protest footage → must match the SPECIFIC cause/location
-- Economic news → can be more flexible with stock footage of markets, trade, etc.
+STEP 1: Identify what country/location this footage is from:
+- Look for FLAGS (most important indicator)
+- Look for RECOGNIZABLE LANDMARKS/SKYLINES:
+  * Abu Dhabi/UAE: Etihad Towers, Emirates Palace, modern skyscrapers
+  * Dubai: Burj Khalifa, Palm Jumeirah
+  * Israel: Tel Aviv skyline, Jerusalem Old City, Hebrew text
+  * Iran: Persian architecture, Farsi text, Iranian flags
+- Look for SIGNS/TEXT (language, alphabet - Hebrew, Arabic, Persian, etc.)
+- Look for ARCHITECTURE style
 
-Answer with JSON only:
+STEP 2: Compare with required country (${analysis.country || 'unknown'})
+${wrongCountryExamples.length > 0 ? `
+⚠️ COMMONLY CONFUSED - Do NOT accept footage from:
+${wrongCountryExamples.map(c => `- ${c}`).join('\n')}
+` : ''}
+
+═══════════════════════════════════════════════════════════════════════
+SCORING RULES - COUNTRY MATCH IS #1 PRIORITY:
+═══════════════════════════════════════════════════════════════════════
+
+✅ CORRECT COUNTRY + CORRECT TOPIC (85-100):
+- Footage clearly from ${analysis.country || 'required country'}
+- Shows relevant content (${analysis.key_visuals?.slice(0, 2).join(', ') || 'topic-related'})
+
+⚠️ UNCERTAIN COUNTRY + CORRECT TOPIC (50-70):
+- Cannot verify country from image
+- But topic/content seems relevant
+
+❌ WRONG COUNTRY (0-30) - AUTOMATIC REJECT:
+- Footage shows flags/landmarks from DIFFERENT country
+- UAE/Dubai skyline when topic is about Israel → 5-15
+- Abu Dhabi landmarks when topic is about Iran → 5-15
+- European city when topic is about Middle East → 10-20
+- Any clearly wrong location → REJECT
+
+❌ WRONG TOPIC (0-40):
+- Footage from correct country but wrong topic
+- E.g., sports event when topic is diplomacy
+
+═══════════════════════════════════════════════════════════════════════
+RESPOND WITH JSON ONLY:
+═══════════════════════════════════════════════════════════════════════
 {
   "shows_relevant_content": true/false,
+  "detected_country": "What country does this footage appear to be from? (based on flags, landmarks, architecture)",
+  "detected_landmarks": "Any recognizable landmarks or skylines? (be specific)",
+  "country_match": true/false/unknown,
+  "country_confidence": 0.0-1.0,
+  "wrong_country_detected": "Name of wrong country if visible (e.g., 'UAE' when expecting 'Israel'), else null",
   "detected_elements": ["element1", "element2", "element3"],
   "context_match": "exact/related/loose/none",
-  "country_match": true/false,
   "relevance_score": 0-100,
   "recommendation": "ACCEPT/REVIEW/REJECT",
-  "reason": "Brief explanation of why this footage matches or doesn't match"
+  "reason": "Brief explanation focusing on country match and content relevance"
 }`;
-                    }
+                }
+            };
 
-                    const visionResult = await visionModel.generateContent([
-                        { inlineData: { mimeType: 'image/png', data: video.screenshot.toString('base64') } },
-                        visionPrompt
-                    ]);
+            // Helper function to process vision result
+            const processVisionResult = (video, visionText, videoIndex) => {
+                let visual;
+                try {
+                    visual = JSON.parse(visionText.replace(/```json\n?|```/g, '').trim());
+                } catch (parseError) {
+                    visual = {
+                        shows_relevant_content: false,
+                        relevance_score: 30,
+                        recommendation: 'REVIEW',
+                        reason: 'Could not parse vision response'
+                    };
+                }
 
-                    const visionText = visionResult.response.text().replace(/```json\n?|```/g, '').trim();
-                    
-                    // Parse JSON with error handling
-                    let visual;
-                    try {
-                        visual = JSON.parse(visionText);
-                    } catch (parseError) {
-                        console.error(`      JSON parse error: ${parseError.message}`);
-                        console.error(`      Raw response: ${visionText.substring(0, 200)}...`);
-                        // Create default response
-                        visual = {
-                            shows_relevant_content: false,
-                            relevance_score: 30,
-                            recommendation: 'REVIEW',
-                            reason: 'Could not parse vision response'
-                        };
-                    }
-                    
-                    // Process results based on mode
-                    if (requiresPersonMatch) {
-                        // Person matching mode
-                        const isPersonMatch = visual.shows_person === true && 
-                            (visual.person_identified?.toLowerCase().includes(personToMatch.toLowerCase().split(' ')[0]) || 
-                             visual.confidence >= 0.8);
-                        
-                        if (isPersonMatch) {
-                            visual.relevance_score = Math.max(visual.relevance_score, 90);
-                            visual.recommendation = 'ACCEPT';
-                            visual.person_match = true;
-                            console.log(`      [PERSONA ENCONTRADA] ${visual.person_identified} (${(visual.confidence * 100).toFixed(0)}%)`);
-                        } else if (visual.shows_person && visual.confidence >= 0.5) {
-                            visual.recommendation = 'REVIEW';
-                            visual.person_match = 'possible';
-                            console.log(`      [POSIBLE] ${visual.person_identified} (${(visual.confidence * 100).toFixed(0)}%)`);
-                        } else {
-                            visual.relevance_score = Math.min(visual.relevance_score, 40);
-                            visual.recommendation = 'REJECT';
-                            visual.person_match = false;
-                            console.log(`      [NO ES ${personToMatch}] Detectado: ${visual.person_identified}`);
-                        }
-                        
-                        visual.person_detected = visual.person_identified;
+                // Process results based on mode
+                if (requiresPersonMatch) {
+                    // Check if target person is shown
+                    const showsTarget = visual.shows_target_person === true || visual.shows_person === true;
+                    const personIdentified = (visual.person_identified || '').toLowerCase();
+                    const targetName = personToMatch.toLowerCase();
+                    const targetFirstName = targetName.split(' ')[0];
+                    const targetLastName = targetName.split(' ').pop();
+
+                    // Check if identified person matches target
+                    const nameMatches = personIdentified.includes(targetFirstName) ||
+                        personIdentified.includes(targetLastName) ||
+                        personIdentified.includes(targetName);
+
+                    // Use identification_confidence if available, fallback to confidence
+                    const confidence = visual.identification_confidence || visual.confidence || 0;
+
+                    const isPersonMatch = showsTarget && nameMatches && confidence >= 0.6;
+                    const isCrowdOrProtest = visual.is_crowd_or_protest === true;
+                    const isDifferentPolitician = visual.is_different_politician === true;
+
+                    // NEW: Check for wrong country flags (even if person seems correct)
+                    const hasWrongFlags = visual.flags_match_expected === false || visual.wrong_country_flags;
+                    const wrongFlagsCountry = visual.wrong_country_flags;
+
+                    // FIRST: Check for wrong flags - this is a STRONG rejection signal
+                    if (hasWrongFlags && wrongFlagsCountry) {
+                        // Wrong country flags visible - REJECT even if a politician is visible
+                        visual.relevance_score = Math.min(visual.relevance_score || 100, 12);
+                        visual.recommendation = 'REJECT';
+                        visual.person_match = false;
+                        visual.wrong_flags_detected = wrongFlagsCountry;
+                        console.log(`         ✗ RECHAZADO: Banderas incorrectas (${wrongFlagsCountry}) - NO es ${personToMatch}`);
+                    } else if (isPersonMatch) {
+                        // Target person found with correct flags!
+                        visual.relevance_score = Math.max(visual.relevance_score || 0, 90);
+                        visual.recommendation = 'ACCEPT';
+                        visual.person_match = true;
+                        console.log(`         ✓ PERSONA ENCONTRADA: ${personToMatch} (${(confidence * 100).toFixed(0)}% confidence)`);
+                    } else if (isDifferentPolitician) {
+                        // Different politician detected - STRONG REJECT
+                        visual.relevance_score = Math.min(visual.relevance_score || 100, 10);
+                        visual.recommendation = 'REJECT';
+                        visual.person_match = false;
+                        console.log(`         ✗ RECHAZADO: Muestra a ${visual.different_politician_name || personIdentified}, NO a ${personToMatch}`);
+                    } else if (isCrowdOrProtest) {
+                        // Crowd/protest - REJECT hard
+                        visual.relevance_score = Math.min(visual.relevance_score || 100, 15);
+                        visual.recommendation = 'REJECT';
+                        visual.person_match = false;
+                        console.log(`         ✗ RECHAZADO: Muestra multitud/protesta, no a ${personToMatch}`);
+                    } else if (showsTarget && confidence >= 0.4) {
+                        // Possibly the person but not sure
+                        visual.relevance_score = Math.min(visual.relevance_score || 100, 50);
+                        visual.recommendation = 'REVIEW';
+                        visual.person_match = 'possible';
+                        console.log(`         ? REVISAR: Posiblemente ${personToMatch} (${(confidence * 100).toFixed(0)}% confidence)`);
                     } else {
-                        // FOOTAGE MODE - Consider context_match and country_match
-                        const contextMatch = visual.context_match || 'none';
-                        const countryMatch = visual.country_match !== false;
-                        
-                        // Adjust score based on context
-                        if (contextMatch === 'exact' && countryMatch) {
-                            visual.relevance_score = Math.max(visual.relevance_score, 85);
-                            console.log(`      [CONTEXTO EXACTO] País correcto`);
-                        } else if (contextMatch === 'related' && countryMatch) {
-                            visual.relevance_score = Math.max(visual.relevance_score, 70);
-                            console.log(`      [CONTEXTO RELACIONADO] País correcto`);
-                        } else if (!countryMatch && visual.relevance_score > 60) {
-                            visual.relevance_score = Math.min(visual.relevance_score, 55);
-                            console.log(`      [PAIS INCORRECTO] Score reducido`);
+                        // Wrong person or no person - REJECT
+                        visual.relevance_score = Math.min(visual.relevance_score || 100, 25);
+                        visual.recommendation = 'REJECT';
+                        visual.person_match = false;
+                        console.log(`         ✗ RECHAZADO: No muestra a ${personToMatch} (detectado: ${personIdentified || 'nadie'})`);
+                    }
+                    visual.person_detected = visual.person_identified;
+                    visual.confidence = confidence;
+                    visual.flags_visible = visual.flags_visible || null;
+                } else {
+                    // FOOTAGE MODE - Country verification is critical
+                    const contextMatch = visual.context_match || 'none';
+                    const countryMatch = visual.country_match;
+                    const wrongCountry = visual.wrong_country_detected;
+                    const detectedCountry = visual.detected_country || 'unknown';
+                    const countryConfidence = visual.country_confidence || 0;
+                    const requiredCountry = (analysis.country || '').toLowerCase();
+
+                    // Check if detected country matches required country
+                    const detectedCountryLower = detectedCountry.toLowerCase();
+                    const isCountryMatch = countryMatch === true ||
+                        (requiredCountry && detectedCountryLower.includes(requiredCountry.split('/')[0])) ||
+                        (analysis.secondary_country && detectedCountryLower.includes(analysis.secondary_country.toLowerCase()));
+
+                    // STRONG REJECTION: Wrong country explicitly detected
+                    if (wrongCountry || (countryMatch === false && countryConfidence >= 0.6)) {
+                        visual.relevance_score = Math.min(visual.relevance_score || 100, 15);
+                        visual.recommendation = 'REJECT';
+                        visual.country_rejected = true;
+                        console.log(`         ✗ RECHAZADO: País incorrecto detectado: "${wrongCountry || detectedCountry}" (requiere: ${analysis.country})`);
+                    }
+                    // Country matches - apply normal scoring
+                    else if (isCountryMatch && contextMatch === 'exact') {
+                        visual.relevance_score = Math.max(visual.relevance_score || 0, 85);
+                        visual.recommendation = 'ACCEPT';
+                        console.log(`         ✓ ACEPTADO: País correcto (${detectedCountry}) + tema exacto`);
+                    }
+                    else if (isCountryMatch && contextMatch === 'related') {
+                        visual.relevance_score = Math.max(visual.relevance_score || 0, 70);
+                        visual.recommendation = 'ACCEPT';
+                        console.log(`         ✓ ACEPTADO: País correcto (${detectedCountry}) + tema relacionado`);
+                    }
+                    // Country unknown but content seems relevant
+                    else if (countryMatch === 'unknown' || countryMatch === null) {
+                        if (contextMatch === 'exact' || contextMatch === 'related') {
+                            visual.relevance_score = Math.min(visual.relevance_score || 100, 65);
+                            visual.recommendation = 'REVIEW';
+                            console.log(`         ? REVISAR: País incierto (${detectedCountry}), pero tema relevante`);
+                        } else {
+                            visual.relevance_score = Math.min(visual.relevance_score || 100, 40);
+                            visual.recommendation = 'REJECT';
+                            console.log(`         ✗ RECHAZADO: País incierto + tema no relacionado`);
                         }
-                        
-                        // Set recommendation based on adjusted score
+                    }
+                    // Country doesn't match
+                    else if (!isCountryMatch) {
+                        visual.relevance_score = Math.min(visual.relevance_score || 100, 25);
+                        visual.recommendation = 'REJECT';
+                        visual.country_rejected = true;
+                        console.log(`         ✗ RECHAZADO: País no coincide - detectado: "${detectedCountry}", requiere: "${analysis.country}"`);
+                    }
+                    // Default case
+                    else {
                         if (visual.relevance_score >= 75) {
                             visual.recommendation = 'ACCEPT';
                         } else if (visual.relevance_score >= 55) {
@@ -1840,132 +2822,233 @@ Answer with JSON only:
                         } else {
                             visual.recommendation = 'REJECT';
                         }
-                        
-                        console.log(`      Context: ${contextMatch}, Country: ${countryMatch}`);
                     }
-                    
-                    video.visualAnalysis = { 
-                        success: true, 
-                        ...visual,
-                        matchMode: requiresPersonMatch ? 'person' : 'footage'
-                    };
-                    analyzedCount++;
 
-                    console.log(`      Score: ${visual.relevance_score}`);
-                    console.log(`      Recommendation: ${visual.recommendation}`);
+                    visual.detected_country = detectedCountry;
+                }
 
-                    // Send to UI
-                    const matchInfo = requiresPersonMatch 
-                        ? `${visual.person_match === true ? 'SI' : visual.person_match === 'possible' ? 'POSIBLE' : 'NO'} - ${visual.person_detected || 'N/A'}`
-                        : `${visual.relevance_score}%`;
-                    
-                    onProgress({ 
-                        stage: 5, 
-                        message: `[${vi + 1}/${topVideos.length}] ${visual.recommendation}: ${requiresPersonMatch ? `Persona: ${matchInfo}` : `Relevancia: ${matchInfo}`}`,
-                        videoTitle: shortTitle,
-                        visualScore: visual.relevance_score,
-                        recommendation: visual.recommendation,
-                        personMatch: visual.person_match,
-                        personDetected: visual.person_detected,
-                        matchMode: requiresPersonMatch ? 'person' : 'footage'
-                    });
+                return {
+                    success: true,
+                    ...visual,
+                    matchMode: requiresPersonMatch ? 'person' : 'footage'
+                };
+            };
 
-                    await new Promise(r => setTimeout(r, 1500)); // Rate limit
+            // Helper function to analyze a single video
+            const analyzeVideoVisually = async (video, videoIndex) => {
+                if (!video.screenshot) {
+                    console.log(`      [Vision] Video ${videoIndex + 1}: NO SCREENSHOT - skipping`);
+                    return { video, videoIndex, success: false, error: 'no_screenshot' };
+                }
 
+                try {
+                    const screenshotSize = video.screenshot.length;
+                    console.log(`      [Vision] Video ${videoIndex + 1}: Sending ${(screenshotSize / 1024).toFixed(1)}KB image to Gemini...`);
+
+                    const visionPrompt = buildVisionPrompt(video);
+                    const visionResult = await visionModel.generateContent([
+                        { inlineData: { mimeType: 'image/png', data: video.screenshot.toString('base64') } },
+                        visionPrompt
+                    ]);
+
+                    const visionText = visionResult.response.text();
+                    console.log(`      [Vision] Video ${videoIndex + 1}: Got response (${visionText.length} chars)`);
+
+                    const visualAnalysis = processVisionResult(video, visionText, videoIndex);
+
+                    return { video, videoIndex, success: true, visualAnalysis };
                 } catch (error) {
-                    console.error(`      Vision error: ${error.message}`);
-                    video.visualAnalysis = { success: false };
-                    onProgress({ 
-                        stage: 5, 
-                        message: `[${vi + 1}/${topVideos.length}] Error: ${error.message?.substring(0, 30)}`,
-                        error: true
-                    });
+                    console.error(`      [Vision] Video ${videoIndex + 1}: ERROR - ${error.message}`);
+                    return { video, videoIndex, success: false, error: error.message };
+                }
+            };
+
+            // Process videos in parallel batches of 2 (conservative to avoid Gemini rate limiting)
+            const VISION_PARALLEL = 2;
+            let analyzedCount = 0;
+            const allResults = [];
+
+            for (let batch = 0; batch < topVideos.length; batch += VISION_PARALLEL) {
+                checkSkip();
+
+                const batchVideos = topVideos.slice(batch, batch + VISION_PARALLEL);
+                const batchNum = Math.floor(batch / VISION_PARALLEL) + 1;
+                const totalBatches = Math.ceil(topVideos.length / VISION_PARALLEL);
+
+                // Log batch with video titles being analyzed
+                const videoTitles = batchVideos.map(v => `"${(v.title || '').substring(0, 25)}"`).join(', ');
+                console.log(`   [Batch ${batchNum}/${totalBatches}] Analyzing: ${videoTitles}`);
+
+                onProgress({
+                    stage: 5,
+                    message: `[Vision] Batch ${batchNum}/${totalBatches}: ${videoTitles}`,
+                    current: batch,
+                    total: topVideos.length
+                });
+
+                // Run batch in parallel
+                const batchPromises = batchVideos.map((video, idx) => {
+                    const globalIndex = batch + idx;
+                    return analyzeVideoVisually(video, globalIndex);
+                });
+
+                const batchResults = await Promise.all(batchPromises);
+
+                // Process results and log in order
+                for (const result of batchResults) {
+                    const { video, videoIndex, success, visualAnalysis, error } = result;
+                    const shortTitle = (video.title || '').substring(0, 35);
+
+                    if (success && visualAnalysis) {
+                        video.visualAnalysis = visualAnalysis;
+                        analyzedCount++;
+
+                        const symbol = visualAnalysis.recommendation === 'ACCEPT' ? '✓' :
+                            visualAnalysis.recommendation === 'REVIEW' ? '?' : '✗';
+                        console.log(`      [${videoIndex + 1}/${topVideos.length}] ${symbol} ${visualAnalysis.recommendation}: Relevancia ${visualAnalysis.relevance_score}% - "${shortTitle}..."`);
+                    } else {
+                        video.visualAnalysis = { success: false };
+                        console.log(`      [${videoIndex + 1}/${topVideos.length}] ✗ Error: ${error || 'unknown'} - "${shortTitle}..."`);
+                    }
+
+                    allResults.push(result);
+                }
+
+                // Small delay between batches to avoid rate limiting (only if more batches)
+                if (batch + VISION_PARALLEL < topVideos.length) {
+                    await new Promise(r => setTimeout(r, 300));
                 }
             }
 
+            // Send final progress with summary
+            const acceptCount = allResults.filter(r => r.visualAnalysis?.recommendation === 'ACCEPT').length;
+            const reviewCount = allResults.filter(r => r.visualAnalysis?.recommendation === 'REVIEW').length;
+            const rejectCount = allResults.filter(r => r.visualAnalysis?.recommendation === 'REJECT').length;
+
             results.timings.stage5 = Date.now() - startStage5;
-            console.log(`   Analyzed ${analyzedCount}/${topVideos.length} images in ${results.timings.stage5}ms`);
-            onProgress({ 
-                stage: 5, 
-                message: `Visual analysis complete: ${analyzedCount}/${topVideos.length} images analyzed`,
+            console.log(`   ✓ Vision analysis complete: ${analyzedCount}/${topVideos.length} in ${(results.timings.stage5 / 1000).toFixed(1)}s (${acceptCount} accept, ${reviewCount} review, ${rejectCount} reject)`);
+
+            onProgress({
+                stage: 5,
+                message: `[Vision] ✓ Complete: ${acceptCount} accept, ${reviewCount} review, ${rejectCount} reject (${(results.timings.stage5 / 1000).toFixed(1)}s)`,
                 complete: true
             });
 
             // ================================================================
             // STAGE 6: FINAL RANKING
-            // Now considers person/footage matching in scoring
+            // Different scoring strategies for PERSON vs FOOTAGE mode
             // ================================================================
             console.log('\n[STAGE 6] Final Ranking...');
             const rankingMode = requiresPersonMatch ? 'PERSON PRIORITY' : 'FOOTAGE PRIORITY';
-            onProgress({ stage: 6, message: `Combining scores (${rankingMode}) - 60% text, 40% visual...` });
+
+            // For PERSON mode: visual is MORE important (we need to SEE the person)
+            // For FOOTAGE mode: text and visual are balanced
+            const textWeight = requiresPersonMatch ? 0.3 : 0.6;
+            const visualWeight = requiresPersonMatch ? 0.7 : 0.4;
+
+            onProgress({ stage: 6, message: `Combining scores (${rankingMode}) - ${Math.round(textWeight * 100)}% text, ${Math.round(visualWeight * 100)}% visual...` });
             const startStage6 = Date.now();
 
             const finalRanking = topVideos.map(v => {
                 const textScore = v.textScore.score;
                 const visualScore = v.visualAnalysis?.relevance_score || 0;
                 const hasVisual = v.visualAnalysis?.success;
-                
-                // Base hybrid score: 60% text, 40% visual
-                let finalScore = hasVisual 
-                    ? Math.round(textScore * 0.6 + visualScore * 0.4)
+                const shortTitle = (v.title || '').substring(0, 30);
+
+                // Base hybrid score with mode-specific weights
+                let finalScore = hasVisual
+                    ? Math.round(textScore * textWeight + visualScore * visualWeight)
                     : textScore;
-                
+
                 // Apply bonuses/penalties based on match mode
                 let matchBonus = 0;
                 let matchPenalty = 0;
-                
+
                 if (requiresPersonMatch && v.visualAnalysis) {
-                    // Person matching mode: heavy bonus for person match, heavy penalty for mismatch
+                    // PERSON MODE: Visual confirmation is critical
                     if (v.visualAnalysis.person_match === true) {
-                        matchBonus = 25; // Big bonus for confirmed person match
-                        console.log(`   [BONUS +25] Person match confirmed: ${v.visualAnalysis.person_detected}`);
-                    } else if (v.visualAnalysis.person_match === 'possible' && v.visualAnalysis.person_confidence >= 0.6) {
-                        matchBonus = 10; // Moderate bonus for possible match
-                        console.log(`   [BONUS +10] Possible person match (${(v.visualAnalysis.person_confidence * 100).toFixed(0)}%)`);
+                        matchBonus = 30; // Big bonus for confirmed person match
+                        console.log(`   [BONUS +30] "${shortTitle}..." - Person match confirmed: ${v.visualAnalysis.person_detected}`);
+                    } else if (v.visualAnalysis.person_match === 'possible') {
+                        matchBonus = 5; // Small bonus for possible match
+                        console.log(`   [BONUS +5] "${shortTitle}..." - Possible person match`);
                     } else if (v.visualAnalysis.person_match === false) {
-                        matchPenalty = 30; // Heavy penalty for wrong person
-                        console.log(`   [PENALTY -30] Person mismatch`);
+                        // CRITICAL: If looking for a specific person and video doesn't show them, heavy penalty
+                        matchPenalty = 50; // Very heavy penalty - we need the RIGHT person
+                        console.log(`   [PENALTY -50] "${shortTitle}..." - Wrong person/crowd (not ${personToMatch})`);
+                    }
+
+                    // Extra penalty if Vision rejected with low score (crowds, protests, wrong people)
+                    if (v.visualAnalysis.recommendation === 'REJECT' && visualScore < 30) {
+                        matchPenalty += 20;
+                        console.log(`   [PENALTY -20] "${shortTitle}..." - Vision strongly rejected (${visualScore}%)`);
                     }
                 }
-                
+
                 // TEXT-BASED PERSON MATCH - person name found in video metadata
-                if (v.textScore?.personMatchInText) {
-                    matchBonus += 20; // Bonus for person name in text
-                    console.log(`   [BONUS +20] Person name found in video text/shotlist`);
-                } else if (v.visualAnalysis) {
-                    // Footage matching mode: bonus for high relevance
+                if (v.textScore?.personMatchInText && requiresPersonMatch) {
+                    matchBonus += 15; // Bonus for person name in text
+                    console.log(`   [BONUS +15] "${shortTitle}..." - Person name in metadata`);
+                } else if (!requiresPersonMatch && v.visualAnalysis) {
+                    // FOOTAGE MODE: Country match is CRITICAL
                     const footageScore = v.visualAnalysis.relevance_score || visualScore;
-                    if (footageScore >= 80) {
-                        matchBonus = 15; // Bonus for strong footage match
-                        console.log(`   [BONUS +15] Strong footage match (${footageScore}%)`);
-                    } else if (footageScore < 60) {
-                        matchPenalty = 20; // Penalty for weak footage match
-                        console.log(`   [PENALTY -20] Weak footage match (${footageScore}%)`);
+                    const countryRejected = v.visualAnalysis.country_rejected === true;
+                    const detectedCountry = v.visualAnalysis.detected_country || 'unknown';
+                    const wrongCountry = v.visualAnalysis.wrong_country_detected;
+
+                    // HEAVY PENALTY for wrong country
+                    if (countryRejected || wrongCountry) {
+                        matchPenalty = 60; // Very heavy penalty - WRONG COUNTRY
+                        console.log(`   [PENALTY -60] "${shortTitle}..." - PAÍS INCORRECTO: "${wrongCountry || detectedCountry}" (requiere: ${analysis.country})`);
+                    }
+                    // Bonus for strong footage match with correct country
+                    else if (footageScore >= 80) {
+                        matchBonus = 20; // Bonus for strong footage match
+                        console.log(`   [BONUS +20] "${shortTitle}..." - Footage fuerte + país correcto (${footageScore}%)`);
+                    }
+                    else if (footageScore >= 65) {
+                        matchBonus = 10; // Small bonus for decent match
+                        console.log(`   [BONUS +10] "${shortTitle}..." - Footage decente (${footageScore}%)`);
+                    }
+                    else if (footageScore < 40) {
+                        matchPenalty = 30; // Penalty for weak footage match
+                        console.log(`   [PENALTY -30] "${shortTitle}..." - Footage débil (${footageScore}%)`);
                     }
                 }
-                
+
                 finalScore = Math.max(0, Math.min(100, finalScore + matchBonus - matchPenalty));
-                
-                return { 
-                    ...v, 
-                    finalScore, 
-                    textScoreNum: textScore, 
+
+                console.log(`   Final: ${finalScore} (Text:${textScore} Visual:${visualScore}) - "${shortTitle}..."`)
+
+                return {
+                    ...v,
+                    finalScore,
+                    textScoreNum: textScore,
                     visualScore: hasVisual ? visualScore : null,
                     matchBonus,
                     matchPenalty,
                     personMatch: v.visualAnalysis?.person_match,
                     personDetected: v.visualAnalysis?.person_detected,
-                    sceneMatchPercentage: v.visualAnalysis?.scene_match_percentage
+                    sceneMatchPercentage: v.visualAnalysis?.scene_match_percentage,
+                    // Footage mode fields
+                    detectedCountry: v.visualAnalysis?.detected_country,
+                    countryRejected: v.visualAnalysis?.country_rejected,
+                    wrongCountryDetected: v.visualAnalysis?.wrong_country_detected
                 };
             });
 
-            // Sort by final score, but PRIORITIZE person matches if in person mode
+            // Sort by final score, with special handling for each mode
             finalRanking.sort((a, b) => {
                 if (requiresPersonMatch) {
                     // In person mode: true matches first, then possible, then others
                     const aMatch = a.personMatch === true ? 2 : (a.personMatch === 'possible' ? 1 : 0);
                     const bMatch = b.personMatch === true ? 2 : (b.personMatch === 'possible' ? 1 : 0);
                     if (aMatch !== bMatch) return bMatch - aMatch;
+                } else {
+                    // In footage mode: videos with wrong country go to the bottom
+                    const aWrongCountry = a.visualAnalysis?.country_rejected === true ? 1 : 0;
+                    const bWrongCountry = b.visualAnalysis?.country_rejected === true ? 1 : 0;
+                    if (aWrongCountry !== bWrongCountry) return aWrongCountry - bWrongCountry; // wrong country goes last
                 }
                 return b.finalScore - a.finalScore;
             });
@@ -1975,12 +3058,12 @@ Answer with JSON only:
             // Send winner info to UI with person/footage match details
             const topCandidate = finalRanking[0];
             if (topCandidate) {
-                const matchDetail = requiresPersonMatch 
+                const matchDetail = requiresPersonMatch
                     ? `Person: ${topCandidate.personMatch ? 'YES' : 'NO'} (${topCandidate.personDetected || 'N/A'})`
                     : `Footage: ${topCandidate.sceneMatchPercentage || topCandidate.visualScore}%`;
-                
-                onProgress({ 
-                    stage: 6, 
+
+                onProgress({
+                    stage: 6,
                     message: `Winner: Score ${topCandidate.finalScore} | ${matchDetail} | "${(topCandidate.title || '').substring(0, 35)}..."`,
                     winner: {
                         title: topCandidate.title?.substring(0, 50),
@@ -1994,7 +3077,11 @@ Answer with JSON only:
                     }
                 });
             }
-            results.winner = topCandidate || null;
+            // ANTI-REPEAT: Select best video that wasn't recently used
+            results.winner = this.selectBestVideoAvoidingRepeats(finalRanking);
+            if (results.winner) {
+                this.markVideoAsUsed(results.winner.url);
+            }
             results.matchMode = requiresPersonMatch ? 'person' : 'footage';
 
             results.timings.stage6 = Date.now() - startStage6;
@@ -2006,14 +3093,17 @@ Answer with JSON only:
             console.log('='.repeat(70));
             const medals = ['1st', '2nd', '3rd'];
             finalRanking.forEach((v, i) => {
-                const matchInfo = requiresPersonMatch 
+                const matchInfo = requiresPersonMatch
                     ? `Person: ${v.personMatch || 'N/A'} (${v.personDetected || 'unknown'})`
-                    : `Footage: ${v.visualScore || 0}%`;
-                
-                console.log(`${medals[i] || '#'+(i+1)}: ${v.title}`);
+                    : `Footage: ${v.visualScore || 0}% | País: ${v.detectedCountry || 'unknown'}${v.countryRejected ? ' ❌ RECHAZADO' : ''}`;
+
+                console.log(`${medals[i] || '#' + (i + 1)}: ${v.title}`);
                 console.log(`   URL: ${v.url}`);
                 console.log(`   Final Score: ${v.finalScore} (Text: ${v.textScoreNum}, Visual: ${v.visualScore ?? 'N/A'})`);
                 console.log(`   Match: ${matchInfo}`);
+                if (!requiresPersonMatch && v.wrongCountryDetected) {
+                    console.log(`   ⚠️ País incorrecto detectado: ${v.wrongCountryDetected}`);
+                }
                 console.log(`   Bonuses: +${v.matchBonus || 0} / Penalties: -${v.matchPenalty || 0}`);
                 console.log(`   Verdict: ${v.visualAnalysis?.recommendation || 'N/A'}`);
                 if (v.shotList) {
@@ -2022,11 +3112,11 @@ Answer with JSON only:
                 console.log('');
             });
 
-            console.log(`Total time: ${results.timings.total}ms (${(results.timings.total/1000).toFixed(1)}s)`);
+            console.log(`Total time: ${results.timings.total}ms (${(results.timings.total / 1000).toFixed(1)}s)`);
 
             // Recommendation with match info
             if (topCandidate && topCandidate.finalScore >= 50) {
-                const matchStatus = requiresPersonMatch 
+                const matchStatus = requiresPersonMatch
                     ? (topCandidate.personMatch ? 'PERSON MATCHED' : 'PERSON NOT CONFIRMED')
                     : `FOOTAGE ${topCandidate.sceneMatchPercentage || topCandidate.visualScore}% MATCH`;
                 console.log(`\nRECOMMENDED [${matchStatus}]: "${topCandidate.title.substring(0, 50)}..."`);
@@ -2037,6 +3127,10 @@ Answer with JSON only:
             return results;
 
         } catch (error) {
+            // Re-throw skip errors so they propagate to the caller
+            if (error.message === 'SKIPPED_BY_USER') {
+                throw error;
+            }
             console.error('Intelligent search failed:', error);
             results.error = error.message;
             return results;
@@ -2065,11 +3159,21 @@ Answer with JSON only:
      */
     async intelligentSearchAndDownload(headline, text, geminiApiKey, options = {}) {
         const {
-            onProgress = () => {},
+            onProgress = () => { },
             segmentFrame = null,
             myContentWaitMinutes = 4,
-            maxCandidatesToTry = 5
+            maxCandidatesToTry = 12,
+            excludeUrls = new Set(),  // URLs to exclude (recently used videos)
+            segmentIndex = -1,        // Current segment index for logging
+            shouldSkip = () => false  // Callback to check if user requested skip
         } = options;
+
+        // Helper to check for skip and throw if needed
+        const checkSkip = () => {
+            if (shouldSkip()) {
+                throw new Error('SKIPPED_BY_USER');
+            }
+        };
 
         console.log('\n' + '='.repeat(70));
         console.log('INTELLIGENT SEARCH AND DOWNLOAD');
@@ -2080,9 +3184,14 @@ Answer with JSON only:
 
         // Step 1: Run intelligent search to get ranked candidates
         onProgress({ stage: 'search', message: 'Running intelligent search...' });
+
+        // Check for skip before starting
+        checkSkip();
+
         const searchResults = await this.intelligentSearch(headline, text, geminiApiKey, {
             segmentFrame: segmentFrame,  // Pass the segment frame for visual analysis
-            onProgress: (p) => onProgress({ stage: 'search', ...p })
+            onProgress: (p) => onProgress({ stage: 'search', ...p }),
+            shouldSkip: shouldSkip  // Pass through the skip check callback
         });
 
         if (!searchResults.videos || searchResults.videos.length === 0) {
@@ -2096,7 +3205,29 @@ Answer with JSON only:
 
         console.log(`\n[VioryDownloader] Found ${searchResults.videos.length} candidates, attempting download...`);
 
-        const candidatesToTry = searchResults.videos.slice(0, maxCandidatesToTry);
+        // Filter out recently used videos (anti-repetition)
+        let availableVideos = searchResults.videos;
+        if (excludeUrls && excludeUrls.size > 0) {
+            const originalCount = availableVideos.length;
+            availableVideos = availableVideos.filter(v => !excludeUrls.has(v.url));
+            const excludedCount = originalCount - availableVideos.length;
+
+            if (excludedCount > 0) {
+                console.log(`[Anti-Repeat] Filtered out ${excludedCount} recently used videos`);
+                onProgress({
+                    stage: 'download',
+                    message: `Filtered ${excludedCount} recently used videos to avoid repetition`
+                });
+            }
+
+            // If all videos were filtered out, use the original list but with a warning
+            if (availableVideos.length === 0) {
+                console.log(`[Anti-Repeat] Warning: All candidates were recently used. Using original list.`);
+                availableVideos = searchResults.videos;
+            }
+        }
+
+        const candidatesToTry = availableVideos.slice(0, maxCandidatesToTry);
         const skippedVideos = [];
         let firstVideoTriedMyContent = false;
 
@@ -2106,78 +3237,87 @@ Answer with JSON only:
         console.log(`   URL: ${bestVideo.url}`);
         console.log(`   Score: ${bestVideo.finalScore} (Text: ${bestVideo.textScoreNum}, Visual: ${bestVideo.visualScore ?? 'N/A'})`);
 
-        onProgress({
-            stage: 'download',
-            message: `Downloading best match...`,
-            video: { title: bestVideo.title, url: bestVideo.url, score: bestVideo.finalScore }
-        });
+        // MINIMUM SCORE CHECK - Skip very low scoring videos, try others
+        const MIN_SCORE_FOR_AUTO_DOWNLOAD = 15; // Lowered from 25 to allow more videos for obscure topics
+        if (bestVideo.finalScore < MIN_SCORE_FOR_AUTO_DOWNLOAD) {
+            console.log(`\n⚠️ [VioryDownloader] Best video score (${bestVideo.finalScore}) is below minimum threshold (${MIN_SCORE_FOR_AUTO_DOWNLOAD})`);
+            console.log(`   Skipping this video and trying other candidates...`);
 
-        try {
-            // First attempt: try direct download (skipMyContent=true to detect if it needs My Content)
-            const firstResult = await this.downloadVideo(
-                bestVideo.url,
-                (p) => onProgress({ stage: 'download', ...p }),
-                { skipMyContent: true }
-            );
-
-            if (firstResult.success) {
-                console.log(`\n✅ SUCCESS: Downloaded "${bestVideo.title?.substring(0, 50)}..."`);
-                return this._buildSuccessResult(bestVideo, firstResult, 1, skippedVideos, searchResults);
-            }
-
-            // If needs My Content, wait for it (up to 4 minutes)
-            if (firstResult.needsMyContent) {
-                console.log(`\n[VioryDownloader] Best video requires My Content - waiting up to ${myContentWaitMinutes} minutes...`);
-                firstVideoTriedMyContent = true;
-                
-                onProgress({
-                    stage: 'myContent',
-                    message: `Video processing, waiting up to ${myContentWaitMinutes} min...`,
-                    video: { title: bestVideo.title }
-                });
-
-                const myContentResult = await this.downloadFromMyContent(
-                    (p) => onProgress({ stage: 'myContent', ...p }),
-                    firstResult.videoId,
-                    firstResult.videoTitle,
-                    { maxWaitMinutes: myContentWaitMinutes }
-                );
-
-                if (myContentResult.success) {
-                    console.log(`\n✅ SUCCESS (My Content): Downloaded "${bestVideo.title?.substring(0, 50)}..."`);
-                    return this._buildSuccessResult(bestVideo, myContentResult, 1, skippedVideos, searchResults);
-                }
-
-                // Timeout - add to skipped and try alternatives
-                if (myContentResult.timeout) {
-                    console.log(`\n⏱️ TIMEOUT: Video not ready after ${myContentWaitMinutes} minutes`);
-                    skippedVideos.push({
-                        url: bestVideo.url,
-                        title: bestVideo.title,
-                        score: bestVideo.finalScore,
-                        reason: `My Content timeout (${myContentWaitMinutes} min)`
-                    });
-                }
-            }
-        } catch (error) {
-            console.error(`   ❌ Error with best video: ${error.message}`);
             skippedVideos.push({
                 url: bestVideo.url,
                 title: bestVideo.title,
                 score: bestVideo.finalScore,
-                reason: error.message
+                reason: `Score too low (${bestVideo.finalScore} < ${MIN_SCORE_FOR_AUTO_DOWNLOAD})`
             });
-        }
+
+            // Continue to try alternative candidates (don't return early)
+        } else {
+
+            onProgress({
+                stage: 'download',
+                message: `Downloading best match...`,
+                video: { title: bestVideo.title, url: bestVideo.url, score: bestVideo.finalScore }
+            });
+
+            try {
+                // First attempt: try direct download (skipMyContent=true to detect if it needs My Content)
+                const firstResult = await this.downloadVideo(
+                    bestVideo.url,
+                    (p) => onProgress({ stage: 'download', ...p }),
+                    { skipMyContent: true, shouldSkip }
+                );
+
+                if (firstResult.success) {
+                    console.log(`\n✅ SUCCESS: Downloaded "${bestVideo.title?.substring(0, 50)}..."`);
+                    return this._buildSuccessResult(bestVideo, firstResult, 1, skippedVideos, searchResults);
+                }
+
+                // If needs My Content, skip it and try alternatives (Optimization: don't wait for "preparing video")
+                if (firstResult.needsMyContent) {
+                    console.log(`\n[VioryDownloader] Best video requires My Content - SKIPPING to alternatives (Optimization)`);
+                    skippedVideos.push({
+                        url: bestVideo.url,
+                        title: bestVideo.title,
+                        score: bestVideo.finalScore,
+                        reason: `Requires My Content (skipped for speed)`
+                    });
+                }
+            } catch (error) {
+                if (error.message === 'SKIPPED_BY_USER') throw error;
+                console.error(`   ❌ Error with best video: ${error.message}`);
+                skippedVideos.push({
+                    url: bestVideo.url,
+                    title: bestVideo.title,
+                    score: bestVideo.finalScore,
+                    reason: error.message
+                });
+            }
+        } // Close the else block for MIN_SCORE check
 
         // Step 3: Try remaining candidates (SKIP My Content - only direct downloads)
         console.log(`\n[VioryDownloader] Trying alternative candidates (direct download only)...`);
 
         for (let i = 1; i < candidatesToTry.length; i++) {
+            // Check for skip before trying each candidate
+            checkSkip();
+
             const video = candidatesToTry[i];
-            
+
             console.log(`\n[VioryDownloader] Trying candidate ${i + 1}/${candidatesToTry.length}: "${video.title?.substring(0, 50)}..."`);
             console.log(`   URL: ${video.url}`);
             console.log(`   Score: ${video.finalScore}`);
+
+            // Skip low-scoring alternatives
+            if (video.finalScore < MIN_SCORE_FOR_AUTO_DOWNLOAD) {
+                console.log(`   ⏭️ Skipped - score too low (${video.finalScore} < ${MIN_SCORE_FOR_AUTO_DOWNLOAD})`);
+                skippedVideos.push({
+                    url: video.url,
+                    title: video.title,
+                    score: video.finalScore,
+                    reason: `Score too low (${video.finalScore})`
+                });
+                continue;
+            }
 
             onProgress({
                 stage: 'download',
@@ -2189,7 +3329,7 @@ Answer with JSON only:
                 const downloadResult = await this.downloadVideo(
                     video.url,
                     (p) => onProgress({ stage: 'download', ...p }),
-                    { skipMyContent: true }  // Always skip My Content for alternatives
+                    { skipMyContent: true, shouldSkip }  // Always skip My Content for alternatives
                 );
 
                 if (downloadResult.success) {
@@ -2216,6 +3356,7 @@ Answer with JSON only:
                 });
 
             } catch (error) {
+                if (error.message === 'SKIPPED_BY_USER') throw error;
                 console.error(`   ❌ Error: ${error.message}`);
                 skippedVideos.push({
                     url: video.url,
@@ -2226,17 +3367,64 @@ Answer with JSON only:
             }
         }
 
-        // All candidates failed
+        // All candidates failed - check if they ALL needed My Content
+        const allNeedMyContent = skippedVideos.every(v =>
+            v.reason && v.reason.toLowerCase().includes('my content')
+        );
+
+        // ================================================================
+        // EMERGENCY FALLBACK: When all fail, try best available with score >= 10
+        // This ensures obscure topics (EA-37B, specific equipment) get something
+        // ================================================================
+        const EMERGENCY_MIN_SCORE = 10;
+        const emergencyCandidate = candidatesToTry.find(v =>
+            v.finalScore >= EMERGENCY_MIN_SCORE &&
+            !skippedVideos.some(sv => sv.url === v.url && sv.reason?.includes('My Content'))
+        );
+
+        if (emergencyCandidate && !allNeedMyContent) {
+            console.log(`\n⚠️ [EMERGENCY FALLBACK] Trying best available video (score: ${emergencyCandidate.finalScore})`);
+            console.log(`   Title: "${emergencyCandidate.title?.substring(0, 50)}..."`);
+
+            onProgress({
+                stage: 'download',
+                message: `Emergency fallback - downloading best available...`,
+                video: { title: emergencyCandidate.title, url: emergencyCandidate.url, score: emergencyCandidate.finalScore }
+            });
+
+            try {
+                const emergencyResult = await this.downloadVideo(
+                    emergencyCandidate.url,
+                    (p) => onProgress({ stage: 'download', ...p }),
+                    { skipMyContent: true, shouldSkip }
+                );
+
+                if (emergencyResult.success) {
+                    console.log(`\n✅ EMERGENCY FALLBACK SUCCESS: Downloaded with score ${emergencyCandidate.finalScore}`);
+                    return this._buildSuccessResult(emergencyCandidate, emergencyResult, 'emergency', skippedVideos, searchResults);
+                }
+            } catch (err) {
+                console.error(`   Emergency fallback failed: ${err.message}`);
+            }
+        }
+
+        // Final failure - NEVER wait for My Content, just report the failure
         console.log('\n❌ ALL CANDIDATES FAILED');
         console.log('Skipped videos:');
         skippedVideos.forEach((v, i) => {
             console.log(`   ${i + 1}. "${v.title?.substring(0, 40)}..." - ${v.reason}`);
         });
 
+        if (allNeedMyContent && skippedVideos.length > 0) {
+            console.log('\n[VioryDownloader] ALL candidates require My Content - no direct downloads available');
+        }
+
         return {
             success: false,
-            error: 'All video candidates failed to download',
-            triedMyContent: firstVideoTriedMyContent,
+            error: allNeedMyContent
+                ? `All ${skippedVideos.length} videos require "My Content" processing. Try a different search term or use Manual URL.`
+                : 'All video candidates failed to download',
+            allNeedMyContent,
             skippedVideos,
             searchResults
         };
@@ -2247,6 +3435,16 @@ Answer with JSON only:
      * @private
      */
     _buildSuccessResult(video, downloadResult, candidateNumber, skippedVideos, searchResults) {
+        // Use mandatoryCredit from downloadResult if available (extracted during download),
+        // otherwise fall back to video.mandatoryCredit (from deep analysis)
+        const finalMandatoryCredit = downloadResult.mandatoryCredit || video.mandatoryCredit || '';
+
+        // DEBUG: Log mandatory credit extraction
+        console.log(`[VioryDownloader] _buildSuccessResult - video.mandatoryCredit: "${video.mandatoryCredit || '(EMPTY)'}"`);
+        console.log(`[VioryDownloader] _buildSuccessResult - downloadResult.mandatoryCredit: "${downloadResult.mandatoryCredit || '(EMPTY)'}"`);
+        console.log(`[VioryDownloader] _buildSuccessResult - FINAL mandatoryCredit: "${finalMandatoryCredit || '(EMPTY)'}"`);
+        console.log(`[VioryDownloader] _buildSuccessResult - video.title: "${video.title}"`);
+
         return {
             success: true,
             path: downloadResult.path,
@@ -2260,68 +3458,12 @@ Answer with JSON only:
                 visualScore: video.visualScore,
                 shotList: video.shotList,
                 videoInfo: video.videoInfo,
-                mandatoryCredit: video.mandatoryCredit
+                mandatoryCredit: finalMandatoryCredit
             },
             candidateNumber,
             skippedVideos,
             searchResults
         };
-    }
-
-    /**
-     * Clear screenshot cache (call periodically to free memory)
-     */
-    clearScreenshotCache() {
-        const size = screenshotCache.size;
-        screenshotCache.clear();
-        console.log(`[VioryDownloader] Cleared ${size} cached screenshots`);
-    }
-
-    /**
-     * Calculate relevance score based on query and metadata
-     */
-    calculateRelevance(query, metadata) {
-        let score = 0;
-        const queryLower = query.toLowerCase();
-        const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
-
-        // Combine all text
-        const content = (
-            (metadata.title || '') + ' ' +
-            (metadata.description || '') + ' ' +
-            (metadata.videoInfo || '') + ' ' +
-            (metadata.shotList || '')
-        ).toLowerCase();
-
-        // Check exact match
-        if (content.includes(queryLower)) score += 30;
-
-        // Check keywords
-        let matched = 0;
-        queryWords.forEach(word => {
-            if (content.includes(word)) {
-                score += 10;
-                matched++;
-
-                // Extra points if in title
-                if ((metadata.title || '').toLowerCase().includes(word)) score += 10;
-            }
-        });
-
-        // Context keywords (user preferences)
-        PRIORITY_KEYWORDS.forEach(kw => {
-            if (content.includes(kw)) score += 5;
-        });
-
-        // Penalties (e.g. if it's too short or malformed)
-        if (!metadata.title) score -= 20;
-
-        return { total: score, matched };
-    }
-
-    // Deprecated: simple selection (replaced by searchVideos deep analysis)
-    selectBestVideos(videos, query, limit) {
-        return videos;
     }
 
     /**
@@ -2333,15 +3475,16 @@ Answer with JSON only:
     }
 
     /**
-     * Download a video with checkbox handling, "preparing video" detection, and My Content fallback
+     * Download a video with checkbox handling and "preparing video" detection
      * @param {string} videoUrl - Video URL to download
      * @param {Function} onProgress - Progress callback
      * @param {Object} options - Download options
-     * @param {boolean} options.skipMyContent - If true, return immediately when video needs My Content (don't wait)
+     * @param {boolean} options.skipMyContent - If true (default), return immediately when video needs My Content (don't wait)
+     * @param {Function} options.shouldSkip - Optional callback to check if user requested skip
      * @returns {Object} Result with success, path, or needsMyContent flag
      */
     async downloadVideo(videoUrl, onProgress, options = {}) {
-        const { skipMyContent = false } = options;
+        const { skipMyContent = true, shouldSkip = () => false } = options;
         console.log(`[VioryDownloader] Opening video: ${videoUrl}`);
 
         // Extract Video ID for exact matching in My Content
@@ -2357,7 +3500,7 @@ Answer with JSON only:
             await this.page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
             // OPTIMIZED: Wait for button selector instead of fixed 2000ms timeout
             // ORIGINAL: await this.page.waitForTimeout(2000);
-            await this.page.waitForSelector('button', { timeout: 5000 }).catch(() => {});
+            await this.page.waitForSelector('button', { timeout: 5000 }).catch(() => { });
             await this.page.waitForTimeout(800);
             await this.dismissPopups();
 
@@ -2367,6 +3510,34 @@ Answer with JSON only:
                 return h1 ? h1.innerText.trim() : '';
             });
             console.log(`[VioryDownloader] Video title: "${videoTitle.substring(0, 50)}..."`);
+
+            // CRITICAL FIX: Extract mandatory credit NOW, while it's visible in "Restrictions" section
+            // After clicking Download, the modal changes and credit may not be accessible
+            let earlyMandatoryCredit = '';
+            try {
+                earlyMandatoryCredit = await this.page.evaluate(() => {
+                    const bodyText = document.body.innerText || '';
+                    const creditMatch = bodyText.match(/[Mm]andatory\s*credit[:\s]+([^\n]+)/);
+                    if (creditMatch && creditMatch[1]) {
+                        let credit = creditMatch[1].trim();
+                        credit = credit.replace(/[;].*$/, '').trim();
+                        credit = credit.replace(/\/[A-Z].*$/i, '').trim();
+                        credit = credit.replace(/\s*\/-.*$/, '').trim();
+                        credit = credit.replace(/\s*\/\s*-.*$/, '').trim();
+                        credit = credit.replace(/\s+-\s+.*$/, '').trim();
+                        credit = credit.replace(/[.,;:\/]+$/, '').trim();
+                        if (credit.length >= 3 && credit.length <= 100) {
+                            return credit;
+                        }
+                    }
+                    return '';
+                });
+                if (earlyMandatoryCredit) {
+                    console.log(`[VioryDownloader] ✅ Early extracted mandatoryCredit: "${earlyMandatoryCredit}"`);
+                }
+            } catch (e) {
+                console.log(`[VioryDownloader] Could not extract early credit: ${e.message}`);
+            }
 
             // Scroll to show download button
             await this.page.evaluate(() => window.scrollBy(0, 300));
@@ -2470,7 +3641,7 @@ Answer with JSON only:
 
             if (preparingModal.isPreparing) {
                 console.log('[VioryDownloader] Detected "Preparing video" modal - video needs watermarking');
-                
+
                 // If skipMyContent is true, return immediately without waiting
                 if (skipMyContent) {
                     console.log('[VioryDownloader] skipMyContent=true, returning needsMyContent flag');
@@ -2480,9 +3651,9 @@ Answer with JSON only:
                         const continueBtn = btns.find(b => (b.textContent || '').toLowerCase() === 'continue');
                         if (continueBtn) continueBtn.click();
                     });
-                    await this.page.keyboard.press('Escape').catch(() => {});
+                    await this.page.keyboard.press('Escape').catch(() => { });
                     await this.page.waitForTimeout(300);
-                    
+
                     return {
                         success: false,
                         needsMyContent: true,
@@ -2492,7 +3663,7 @@ Answer with JSON only:
                         message: 'Video requires My Content processing - skipped'
                     };
                 }
-                
+
                 if (onProgress) onProgress({ status: 'preparing', message: 'Video is being prepared with watermark...' });
 
                 // Click "Go to My content" button if available
@@ -2512,7 +3683,7 @@ Answer with JSON only:
                 }
 
                 // Go to My Content and wait for the video (use Video ID for exact match)
-                return await this.downloadFromMyContent(onProgress, videoId, videoTitle);
+                return await this.downloadFromMyContent(onProgress, videoId, videoTitle, { shouldSkip });
             }
 
             // Wait for download (with shorter timeout since we already checked for preparing modal)
@@ -2520,20 +3691,110 @@ Answer with JSON only:
 
             if (download) {
                 // Direct download started
-                const filename = download.suggestedFilename();
-                const savePath = path.join(this.downloadsPath, filename);
-                console.log(`[VioryDownloader] Downloading: ${filename}`);
+                let filename = download.suggestedFilename();
+                // Ensure unique filename to prevent overwriting
+                const timestamp = Date.now();
+                const uniqueFilename = `${timestamp}_${filename}`;
+                const savePath = path.join(this.downloadsPath, uniqueFilename);
+                console.log(`[VioryDownloader] Downloading: ${uniqueFilename}`);
 
-                if (onProgress) onProgress({ status: 'downloading', filename });
-                await download.saveAs(savePath);
-                await this.saveCookies();
+                if (onProgress) onProgress({ status: 'downloading', filename: uniqueFilename });
 
-                console.log(`[VioryDownloader] Saved: ${savePath}`);
-                return { success: true, path: savePath, filename };
+                try {
+                    await download.saveAs(savePath);
+                    await this.saveCookies();
+
+                    // Verify file was saved
+                    if (!fs.existsSync(savePath)) {
+                        console.error(`[VioryDownloader] File not saved at: ${savePath}`);
+                        throw new Error('Download completed but file not found');
+                    }
+
+                    const stats = fs.statSync(savePath);
+                    if (stats.size < 1000) {
+                        console.error(`[VioryDownloader] File too small (${stats.size} bytes): ${savePath}`);
+                        throw new Error('Downloaded file is too small, likely corrupt');
+                    }
+
+                    console.log(`[VioryDownloader] Saved: ${savePath} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
+
+                    // Extract mandatoryCredit from the current page (we're already on the video page)
+                    // CRITICAL FIX: First expand "Meta data" section where the credit is located
+                    let mandatoryCredit = '';
+                    try {
+                        // Expand "Meta data" section (Mandatory credit is hidden in collapsed accordion)
+                        await this.page.evaluate(() => {
+                            const allElements = document.querySelectorAll('*');
+                            for (const el of allElements) {
+                                if (el.childNodes.length === 1 && el.textContent.trim() === 'Meta data') {
+                                    let sibling = el.nextElementSibling;
+                                    if (sibling && sibling.tagName === 'BUTTON') {
+                                        sibling.click();
+                                        return true;
+                                    }
+                                    const parent = el.parentElement;
+                                    if (parent) {
+                                        sibling = parent.nextElementSibling;
+                                        if (sibling && sibling.tagName === 'BUTTON') {
+                                            sibling.click();
+                                            return true;
+                                        }
+                                    }
+                                }
+                            }
+                            return false;
+                        });
+
+                        // Wait for accordion to expand
+                        await this.page.waitForTimeout(300);
+
+                        // Now extract the mandatory credit
+                        mandatoryCredit = await this.page.evaluate(() => {
+                            const bodyText = document.body.innerText || '';
+                            const creditMatch = bodyText.match(/[Mm]andatory\s*credit[:\s]+([^\n]+)/);
+                            if (creditMatch && creditMatch[1]) {
+                                let credit = creditMatch[1].trim();
+                                // Clean up restrictions like "; News use only"
+                                credit = credit.replace(/[;].*$/, '').trim();
+                                credit = credit.replace(/\/[A-Z].*$/i, '').trim();
+                                credit = credit.replace(/\s*\/-.*$/, '').trim();
+                                credit = credit.replace(/\s*\/\s*-.*$/, '').trim();
+                                credit = credit.replace(/\s+-\s+.*$/, '').trim();
+                                credit = credit.replace(/[.,;:\/]+$/, '').trim();
+                                if (credit.length >= 3 && credit.length <= 100) {
+                                    return credit;
+                                }
+                            }
+                            return '';
+                        });
+                        if (mandatoryCredit) {
+                            console.log(`[VioryDownloader] Extracted mandatoryCredit (late): "${mandatoryCredit}"`);
+                        }
+                    } catch (creditError) {
+                        console.log(`[VioryDownloader] Late credit extraction failed: ${creditError.message}`);
+                    }
+
+                    // Use early-extracted credit if available, otherwise use late-extracted
+                    const finalCredit = earlyMandatoryCredit || mandatoryCredit || '';
+                    if (finalCredit) {
+                        console.log(`[VioryDownloader] ✅ Final mandatoryCredit: "${finalCredit}" (source: ${earlyMandatoryCredit ? 'early' : 'late'})`);
+                    } else {
+                        console.log(`[VioryDownloader] ⚠️ No mandatory credit found`);
+                    }
+
+                    return { success: true, path: savePath, filename, videoTitle, mandatoryCredit: finalCredit };
+                } catch (saveError) {
+                    console.error(`[VioryDownloader] Save failed: ${saveError.message}`);
+                    return {
+                        success: false,
+                        needsMyContent: false,
+                        message: `Download save failed: ${saveError.message}`
+                    };
+                }
             } else {
                 // Download didn't start - check if video needs My Content
                 console.log('[VioryDownloader] Direct download not started');
-                
+
                 // Check if we're in a "preparing" state we missed earlier
                 const secondCheck = await this.checkForPreparingModal();
                 if (secondCheck.isPreparing && skipMyContent) {
@@ -2547,7 +3808,7 @@ Answer with JSON only:
                         message: 'Video requires My Content processing - skipped'
                     };
                 }
-                
+
                 if (skipMyContent) {
                     console.log('[VioryDownloader] skipMyContent=true, not waiting for My Content');
                     return {
@@ -2559,15 +3820,18 @@ Answer with JSON only:
                         message: 'Direct download failed, My Content would be required - skipped'
                     };
                 }
-                
+
                 // Try My Content fallback
                 console.log('[VioryDownloader] Checking My Content...');
-                return await this.downloadFromMyContent(onProgress, videoId, videoTitle);
+                return await this.downloadFromMyContent(onProgress, videoId, videoTitle, { shouldSkip });
             }
 
         } catch (error) {
+            // Re-throw skip errors
+            if (error.message === 'SKIPPED_BY_USER') throw error;
+
             console.error('[VioryDownloader] Download failed:', error.message);
-            
+
             // If skipMyContent, don't try My Content fallback
             if (skipMyContent) {
                 console.log('[VioryDownloader] skipMyContent=true, not attempting My Content fallback');
@@ -2580,11 +3844,13 @@ Answer with JSON only:
                     message: `Download failed: ${error.message} - My Content would be required`
                 };
             }
-            
+
             // Fallback to My Content
             try {
-                return await this.downloadFromMyContent(onProgress, videoId, videoTitle);
+                return await this.downloadFromMyContent(onProgress, videoId, videoTitle, { shouldSkip });
             } catch (fallbackError) {
+                // Re-throw skip errors
+                if (fallbackError.message === 'SKIPPED_BY_USER') throw fallbackError;
                 console.error('[VioryDownloader] My Content fallback also failed:', fallbackError.message);
                 throw error;
             }
@@ -2769,11 +4035,12 @@ Answer with JSON only:
      * @param {string} targetVideoTitle - Video title as fallback for matching
      * @param {Object} options - Options
      * @param {number} options.maxWaitMinutes - Maximum minutes to wait (default: 4)
+     * @param {Function} options.shouldSkip - Optional callback to check if user requested skip
      * @returns {Object} Result with success flag, or timeout flag if video not ready
      */
     async downloadFromMyContent(onProgress, targetVideoId = '', targetVideoTitle = '', options = {}) {
-        const { maxWaitMinutes = 4 } = options;
-        
+        const { maxWaitMinutes = 4, shouldSkip = () => false } = options;
+
         console.log('[VioryDownloader] Navigating to My Content page...');
         console.log(`[VioryDownloader] Target Video ID: ${targetVideoId || '(none)'}`);
         console.log(`[VioryDownloader] Target Title: "${(targetVideoTitle || '').substring(0, 50)}..."`);
@@ -2784,7 +4051,7 @@ Answer with JSON only:
             waitUntil: 'domcontentloaded',
             timeout: 25000
         });
-        await this.page.waitForSelector('button', { timeout: 5000 }).catch(() => {});
+        await this.page.waitForSelector('button', { timeout: 5000 }).catch(() => { });
         await this.page.waitForTimeout(2000);
 
         // Polling configuration - 4 minutes default (48 attempts * 5 seconds)
@@ -2826,7 +4093,7 @@ Answer with JSON only:
                     let container = idEl.parentElement;
                     for (let i = 0; i < 5 && container; i++) {
                         const containerText = container.innerText || '';
-                        
+
                         // Skip if this container is too large (the whole page)
                         if (containerText.length > 5000) {
                             container = container.parentElement;
@@ -2846,7 +4113,7 @@ Answer with JSON only:
                             // Try to extract title
                             const lines = containerText.split('\n').map(l => l.trim()).filter(l => l.length > 15);
                             for (const line of lines) {
-                                if (!line.includes('Download') && !line.includes('Preparing') && 
+                                if (!line.includes('Download') && !line.includes('Preparing') &&
                                     !line.includes('Cancel') && !line.includes('Video') && !line.includes('ID ')) {
                                     videoTitle = line.substring(0, 100);
                                     break;
@@ -2861,11 +4128,11 @@ Answer with JSON only:
                             const btnText = (btn.textContent || '').toLowerCase();
                             if (btnText.includes('download') && (btnText.includes('1080p') || btnText.includes('720p') || btnText.includes('mp4'))) {
                                 targetButton = btn;
-                                
+
                                 // Extract title from the container
                                 const lines = containerText.split('\n').map(l => l.trim()).filter(l => l.length > 15);
                                 for (const line of lines) {
-                                    if (!line.includes('Download') && !line.includes('Preparing') && 
+                                    if (!line.includes('Download') && !line.includes('Preparing') &&
                                         !line.includes('Cancel') && !line.includes('Video') && !line.includes('ID ')) {
                                         videoTitle = line.substring(0, 100);
                                         break;
@@ -2889,10 +4156,10 @@ Answer with JSON only:
                 if (!targetButton) {
                     // Check if video exists but in "Access history" section (already downloaded before)
                     const hasAccessHistory = pageText.includes('Access history');
-                    return { 
-                        found: false, 
-                        reason: 'Could not find download button for this video ID', 
-                        debug: { 
+                    return {
+                        found: false,
+                        reason: 'Could not find download button for this video ID',
+                        debug: {
                             downloadButtonsFound: downloadButtons.length,
                             idElementsFound: idElements.length,
                             hasAccessHistory
@@ -2936,12 +4203,12 @@ Answer with JSON only:
                 const clicked = await this.page.evaluate((videoId) => {
                     // Find the element with our video ID
                     const allElements = Array.from(document.querySelectorAll('*'));
-                    
+
                     for (const el of allElements) {
                         const text = el.innerText || el.textContent || '';
                         if (!text.includes(`ID ${videoId}`) && !text.includes(`ID\n${videoId}`)) continue;
                         if (text.length > 5000) continue; // Skip the whole page
-                        
+
                         // Look for download button
                         const btns = el.querySelectorAll('button');
                         for (const btn of btns) {
@@ -2980,21 +4247,65 @@ Answer with JSON only:
 
                     const download = await downloadPromise;
                     if (download) {
-                        const filename = download.suggestedFilename();
-                        const savePath = path.join(this.downloadsPath, filename);
+                        let filename = download.suggestedFilename();
+                        // Ensure unique filename to prevent overwriting
+                        const timestamp = Date.now();
+                        const uniqueFilename = `${timestamp}_${filename}`;
+                        const savePath = path.join(this.downloadsPath, uniqueFilename);
 
-                        if (onProgress) onProgress({ status: 'saving', filename });
+                        if (onProgress) onProgress({ status: 'saving', filename: uniqueFilename });
                         await download.saveAs(savePath);
                         await this.saveCookies();
 
                         console.log(`[VioryDownloader] Downloaded: ${savePath}`);
+
+                        // CRITICAL FIX: Extract mandatoryCredit by navigating to the video page
+                        // My Content page doesn't show credits, so we need to visit the actual video page
+                        let mandatoryCredit = '';
+                        try {
+                            // Build video URL from ID (format: https://www.viory.video/en/videos/ID/...)
+                            const videoPageUrl = `https://www.viory.video/en/videos/${targetVideoId}/`;
+                            console.log(`[VioryDownloader] Extracting mandatory credit from: ${videoPageUrl}`);
+
+                            await this.page.goto(videoPageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                            await this.page.waitForTimeout(1000);
+
+                            mandatoryCredit = await this.page.evaluate(() => {
+                                const bodyText = document.body.innerText || '';
+                                const creditMatch = bodyText.match(/[Mm]andatory\s*credit[:\s]+([^\n]+)/);
+                                if (creditMatch && creditMatch[1]) {
+                                    let credit = creditMatch[1].trim();
+                                    // Clean up restrictions
+                                    credit = credit.replace(/[;].*$/, '').trim();
+                                    credit = credit.replace(/\/[A-Z].*$/i, '').trim();
+                                    credit = credit.replace(/\s*\/-.*$/, '').trim();
+                                    credit = credit.replace(/\s*\/\s*-.*$/, '').trim();
+                                    credit = credit.replace(/\s+-\s+.*$/, '').trim();
+                                    credit = credit.replace(/[.,;:\/]+$/, '').trim();
+                                    if (credit.length >= 3 && credit.length <= 100) {
+                                        return credit;
+                                    }
+                                }
+                                return '';
+                            });
+
+                            if (mandatoryCredit) {
+                                console.log(`[VioryDownloader] Extracted mandatoryCredit from video page: "${mandatoryCredit}"`);
+                            } else {
+                                console.log(`[VioryDownloader] No mandatory credit found on video page`);
+                            }
+                        } catch (creditErr) {
+                            console.log(`[VioryDownloader] Could not extract credit: ${creditErr.message}`);
+                        }
+
                         return {
                             success: true,
                             path: savePath,
                             filename,
                             fromMyContent: true,
                             videoId: targetVideoId,
-                            videoTitle: videoStatus.title
+                            videoTitle: videoStatus.title,
+                            mandatoryCredit
                         };
                     } else {
                         console.error('[VioryDownloader] Download event not received after click');
@@ -3018,11 +4329,28 @@ Answer with JSON only:
                 }
             }
 
+            // Check for user skip request before waiting
+            if (shouldSkip()) {
+                console.log('[VioryDownloader] User requested skip during My Content wait');
+                throw new Error('SKIPPED_BY_USER');
+            }
+
             // Wait and refresh page
             if (attempt < maxAttempts) {
                 console.log(`[VioryDownloader] Waiting ${pollInterval / 1000}s before refresh...`);
-                await this.page.waitForTimeout(pollInterval);
-                await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+
+                // Break up the wait into smaller chunks to check for skip more often
+                const waitChunks = 5;  // Check every 1 second during 5-second wait
+                const chunkDuration = pollInterval / waitChunks;
+                for (let chunk = 0; chunk < waitChunks; chunk++) {
+                    await this.page.waitForTimeout(chunkDuration);
+                    if (shouldSkip()) {
+                        console.log('[VioryDownloader] User requested skip during My Content wait');
+                        throw new Error('SKIPPED_BY_USER');
+                    }
+                }
+
+                await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => { });
                 await this.page.waitForTimeout(1500);
             }
         }

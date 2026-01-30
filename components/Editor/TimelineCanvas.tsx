@@ -17,7 +17,7 @@ export interface TimelineSegment {
         thumbnail?: string;
         title?: string;
     };
-    status?: 'pending' | 'searching' | 'found' | 'approved' | 'error';
+    status?: 'pending' | 'searching' | 'found' | 'approved' | 'error' | 'error_handled' | 'skipped';
 }
 
 interface TimelineCanvasProps {
@@ -57,32 +57,32 @@ const COLORS = {
     rulerBackground: '#08080a',
     trackBackground: 'rgba(255, 255, 255, 0.02)',
     trackAltBackground: 'rgba(255, 255, 255, 0.015)',
-    
+
     // Ruler
     rulerText: '#4a4a4a',
     rulerLine: '#1a1a1e',
     rulerLineMajor: '#252528',
-    
+
     // Segments
     segmentEmpty: '#141418',
     segmentVideo: '#1a1a1e',
     segmentSelected: 'rgba(255, 0, 85, 0.12)',
     segmentBorder: 'rgba(255, 255, 255, 0.06)',
     segmentBorderSelected: 'rgba(255, 0, 85, 0.5)',
-    
+
     // Waveform - muted warm tone that's easier on eyes
     waveform: '#FF6B8A',
     waveformAlt: '#E85A79',
-    
+
     // Playhead and accent
     playhead: '#FF0055',
     accent: '#FF0055',
-    
+
     // Text
     textPrimary: '#d0d0d0',
     textSecondary: '#666',
     textMuted: '#3a3a3a',
-    
+
     // Status indicators
     statusSearching: '#FFD60A',
     statusReady: '#30D158',
@@ -272,7 +272,7 @@ const TimelineCanvas: React.FC<TimelineCanvasProps> = memo(({
         gradient.addColorStop(1, COLORS.rulerBackground);
         ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, canvasWidth, RULER_HEIGHT);
-        
+
         // Bottom border line
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
         ctx.lineWidth = 1;
@@ -856,13 +856,13 @@ const TimelineCanvas: React.FC<TimelineCanvasProps> = memo(({
                 <button
                     onClick={(e) => { e.stopPropagation(); handleZoomOut(); }}
                     style={{
-                        width: 18, 
-                        height: 18, 
+                        width: 18,
+                        height: 18,
                         borderRadius: 3,
-                        background: 'rgba(255, 255, 255, 0.06)', 
+                        background: 'rgba(255, 255, 255, 0.06)',
                         border: 'none',
-                        color: '#666', 
-                        cursor: 'pointer', 
+                        color: '#666',
+                        cursor: 'pointer',
                         fontSize: 14,
                         lineHeight: '18px',
                         fontWeight: 300,
@@ -873,10 +873,10 @@ const TimelineCanvas: React.FC<TimelineCanvasProps> = memo(({
                     onMouseEnter={(e) => { e.currentTarget.style.color = '#aaa'; e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.color = '#666'; e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; }}
                 >-</button>
-                <span style={{ 
-                    fontSize: 10, 
-                    color: '#555', 
-                    minWidth: 32, 
+                <span style={{
+                    fontSize: 10,
+                    color: '#555',
+                    minWidth: 32,
                     textAlign: 'center',
                     fontFamily: 'monospace'
                 }}>
@@ -885,13 +885,13 @@ const TimelineCanvas: React.FC<TimelineCanvasProps> = memo(({
                 <button
                     onClick={(e) => { e.stopPropagation(); handleZoomIn(); }}
                     style={{
-                        width: 18, 
-                        height: 18, 
+                        width: 18,
+                        height: 18,
                         borderRadius: 3,
-                        background: 'rgba(255, 255, 255, 0.06)', 
+                        background: 'rgba(255, 255, 255, 0.06)',
                         border: 'none',
-                        color: '#666', 
-                        cursor: 'pointer', 
+                        color: '#666',
+                        cursor: 'pointer',
                         fontSize: 14,
                         lineHeight: '18px',
                         fontWeight: 300,

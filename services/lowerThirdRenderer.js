@@ -14,39 +14,43 @@ log.transports.console.level = 'info';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Debug log file path
-const DEBUG_LOG_PATH = path.join(os.homedir(), 'ClickStudio', 'lowerthird-debug.log');
+// =============================================================================
+// LOGGING CONFIGURATION
+// All logs are centralized in ~/ClickStudio/logs/ for easy debugging
+// =============================================================================
+const LOG_DIR = path.join(os.homedir(), 'ClickStudio', 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'lowerthird.log');
 
-// Create log file immediately on module load
+// Initialize log directory and file
 try {
-    const dir = path.dirname(DEBUG_LOG_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(DEBUG_LOG_PATH, `[${new Date().toISOString()}] LowerThirdRenderer module loaded\n`);
+    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+    const separator = `\n${'='.repeat(70)}\n`;
+    fs.appendFileSync(LOG_FILE, `${separator}[${new Date().toISOString()}] LowerThirdRenderer Session Started\n${'='.repeat(70)}\n`);
 } catch (e) {
-    console.error('Failed to create debug log:', e);
+    console.error('[LowerThird] Failed to initialize log file:', e.message);
 }
 
-// Helper to log to file
+// Logging helpers
 function logInfo(msg) {
-    const logLine = `[${new Date().toISOString()}] ${msg}\n`;
+    const logLine = `[${new Date().toISOString()}] [INFO] ${msg}\n`;
     console.log(msg);
-    try {
-        fs.appendFileSync(DEBUG_LOG_PATH, logLine);
-    } catch (e) { /* ignore */ }
+    try { fs.appendFileSync(LOG_FILE, logLine); } catch (e) { /* ignore */ }
 }
 
 function logError(msg) {
-    const logLine = `[${new Date().toISOString()}] ERROR: ${msg}\n`;
+    const logLine = `[${new Date().toISOString()}] [ERROR] ${msg}\n`;
     console.error(msg);
-    try {
-        fs.appendFileSync(DEBUG_LOG_PATH, logLine);
-    } catch (e) { /* ignore */ }
+    try { fs.appendFileSync(LOG_FILE, logLine); } catch (e) { /* ignore */ }
 }
 
 // Lazy load Remotion renderer
 let renderMedia = null;
 let selectComposition = null;
 let remotionLoaded = false;
+
+// Cache composition to avoid re-selecting for each render
+let cachedComposition = null;
+let cachedServeUrl = null;
 
 // ============ OVERLAY CACHE SYSTEM ============
 // Pre-renders overlays in background and caches them for faster export
@@ -143,7 +147,7 @@ function getPixelFormat(profile) {
  */
 async function detectGPU() {
     if (gpuInfo) return gpuInfo;
-    
+
     gpuInfo = {
         hasNvidia: false,
         hasAmd: false,
@@ -188,7 +192,7 @@ async function detectGPU() {
                         const name = parts[1] || '';
                         const ram = parseInt(parts[2]) || 0;
                         const vramMB = Math.round(ram / 1024 / 1024);
-                        
+
                         if (name.toLowerCase().includes('nvidia')) {
                             gpuInfo.hasNvidia = true;
                             gpuInfo.recommended = 'gpu';
@@ -204,14 +208,14 @@ async function detectGPU() {
                                 gpuInfo.gl = 'swiftshader';
                             }
                         }
-                        
+
                         if (vramMB > gpuInfo.vram) {
                             gpuInfo.vram = vramMB;
                             gpuInfo.gpuName = name;
                         }
                     }
                 }
-                
+
                 if (gpuInfo.recommended === 'gpu') {
                     gpuInfo.concurrency = gpuInfo.vram >= 8000 ? 4 : gpuInfo.vram >= 4000 ? 2 : 1;
                     logInfo(`[LowerThird] Detected GPU: ${gpuInfo.gpuName} (${gpuInfo.vram}MB) - Using GPU acceleration`);
@@ -257,10 +261,10 @@ async function loadRemotion() {
         selectComposition = renderer.selectComposition;
         remotionLoaded = true;
         logInfo('[LowerThird] @remotion/renderer loaded successfully');
-        
+
         // Detect GPU on first load
         await detectGPU();
-        
+
         return true;
     } catch (e) {
         logError(`[LowerThird] Failed to load @remotion/renderer: ${e.message}`);
@@ -418,42 +422,42 @@ class LowerThirdRenderer {
 
     /**
      * Main render function - uses Remotion renderer, falls back to Canvas
+     * OPTIMIZED: Reduced logging, efficient cache checking
      */
     async renderLowerThird({ headline, durationInSeconds = 5, segmentId, onProgress = null }) {
         // Initialize paths on first use
         this.initializePaths();
 
         const { line1, line2 } = this.splitHeadlineIntoLines(headline);
-        logInfo(`[LowerThird] ========================================`);
-        logInfo(`[LowerThird] Rendering: "${line1}" | "${line2}"`);
-        logInfo(`[LowerThird] Duration: ${durationInSeconds}s, Segment: ${segmentId}`);
-        
+
         // Helper to report progress to callback
         const reportProgress = (percent) => {
             if (onProgress && typeof onProgress === 'function') {
                 onProgress({ percent, text: headline, segmentId, type: 'lower_third' });
             }
         };
-        
+
         reportProgress(0);
 
         // ============ CHECK CACHE FIRST ============
         const cacheKey = generateCacheKey(line1, line2, durationInSeconds);
-        
-        // Check if already cached
+
+        // Check if already cached - FAST PATH
         const cachedPath = getCachedOverlay(cacheKey);
         if (cachedPath) {
-            logInfo(`[LowerThird] ✨ Using CACHED overlay: ${cachedPath}`);
             // Report progress even for cached items
             reportProgress(100);
             return cachedPath;
         }
-        
+
         // Check if already being rendered (avoid duplicate work)
         if (pendingRenders.has(cacheKey)) {
-            logInfo(`[LowerThird] Waiting for pending render: ${cacheKey}`);
+            logInfo(`[LowerThird] seg=${segmentId}: Waiting for pending render`);
             return pendingRenders.get(cacheKey);
         }
+
+        // Log only when actually rendering (not cached)
+        logInfo(`[LowerThird] seg=${segmentId}: Rendering "${(line1 || '').substring(0, 25)}..."`);
 
         // Create render promise
         const renderPromise = (async () => {
@@ -463,21 +467,17 @@ class LowerThirdRenderer {
                     try {
                         const result = await this.renderWithRemotion({ line1, line2, durationInSeconds, segmentId, reportProgress });
                         if (result && fs.existsSync(result)) {
-                            logInfo(`[LowerThird] ✨ Remotion SUCCESS: ${result}`);
                             reportProgress(100);
                             setCachedOverlay(cacheKey, result);
                             return result;
                         }
                     } catch (e) {
-                        logError(`[LowerThird] ❌ Remotion FAILED: ${e.message}`);
-                        logError(`[LowerThird] Stack: ${e.stack}`);
+                        logError(`[LowerThird] seg=${segmentId}: Remotion failed - ${e.message}`);
                     }
-                } else {
-                    logInfo('[LowerThird] Remotion requirements not met, using Canvas fallback');
                 }
 
                 // Fallback to Canvas (static PNG)
-                logInfo('[LowerThird] Using Canvas fallback (static PNG)...');
+                logInfo(`[LowerThird] seg=${segmentId}: Using Canvas fallback`);
                 const canvasResult = await this.renderWithCanvas({ line1, line2, segmentId });
                 if (canvasResult) {
                     reportProgress(100);
@@ -488,13 +488,14 @@ class LowerThirdRenderer {
                 pendingRenders.delete(cacheKey);
             }
         })();
-        
+
         pendingRenders.set(cacheKey, renderPromise);
         return renderPromise;
     }
 
     /**
      * Render using @remotion/renderer with pre-built bundle
+     * OPTIMIZED: Caches composition, reduces logging, uses shared GPU config
      */
     async renderWithRemotion({ line1, line2, durationInSeconds, segmentId, reportProgress = null }) {
         const loaded = await loadRemotion();
@@ -514,17 +515,15 @@ class LowerThirdRenderer {
             durationInSeconds
         };
 
-        logInfo(`[LowerThird] Remotion render config:`);
-        logInfo(`[LowerThird]   serveUrl: ${this.bundlePath}`);
-        logInfo(`[LowerThird]   binaries: ${this.binariesDir}`);
-        logInfo(`[LowerThird]   browser: ${this.browserPath || 'auto (Remotion will download)'}`);
-        logInfo(`[LowerThird]   output: ${outputPath}`);
-        logInfo(`[LowerThird]   props: ${JSON.stringify(inputProps)}`);
+        // Reduced logging - only log essential info
+        logInfo(`[LowerThird] Render: seg=${segmentId}, frames=${durationFrames}, text="${(line1 || '').substring(0, 20)}..."`);
 
         try {
-            logInfo('[LowerThird] Selecting composition...');
+            // OPTIMIZATION DISABLED: Always select composition to avoid text stickiness in parallel renders
+            // The overhead is small compared to correctness
+            // if (!cachedComposition || cachedServeUrl !== this.bundlePath) {
+            // logInfo('[LowerThird] Selecting composition (first time or bundle changed)...');
 
-            // Build options - only include browserExecutable if we have one
             const selectOptions = {
                 serveUrl: this.bundlePath,
                 id: 'SegmentLowerThird',
@@ -536,23 +535,26 @@ class LowerThirdRenderer {
                 selectOptions.browserExecutable = this.browserPath;
             }
 
-            const composition = await selectComposition(selectOptions);
+            cachedComposition = await selectComposition(selectOptions);
+            cachedServeUrl = this.bundlePath;
 
-            logInfo(`[LowerThird] Composition: ${composition.width}x${composition.height} @ ${composition.fps}fps, ${composition.durationInFrames} frames`);
+            // logInfo(`[LowerThird] Composition cached: ${cachedComposition.width}x${cachedComposition.height} @ ${cachedComposition.fps}fps`);
+            // }
 
-            logInfo('[LowerThird] Starting render...');
-
-            // Get GPU configuration (auto-detected)
+            // Get GPU configuration (auto-detected and cached)
             const gpu = await detectGPU();
-            
+
             const proResProfile = currentProResProfile;
             const pixelFormat = getPixelFormat(proResProfile);
-            
-            logInfo(`[LowerThird] Using ProRes profile: ${proResProfile} (pixel format: ${pixelFormat})`);
-            
+
+            // OPTIMIZED: Use more CPU cores for faster frame rendering (os is already imported at top)
+            const cpuCount = os.cpus().length;
+            const optimizedConcurrency = Math.max(gpu.concurrency, Math.min(cpuCount, 8));
+            logInfo(`[LowerThird] Using concurrency: ${optimizedConcurrency} (CPU cores: ${cpuCount}, GPU concurrency: ${gpu.concurrency})`);
+
             const renderOptions = {
                 composition: {
-                    ...composition,
+                    ...cachedComposition,
                     durationInFrames: durationFrames,
                 },
                 serveUrl: this.bundlePath,
@@ -566,7 +568,7 @@ class LowerThirdRenderer {
                 binariesDirectory: this.binariesDir,
                 timeoutInMilliseconds: 120000,
                 verbose: false,
-                concurrency: gpu.concurrency,
+                concurrency: optimizedConcurrency,
                 jpegQuality: 85,
                 chromiumOptions: {
                     disableWebSecurity: true,
@@ -576,9 +578,9 @@ class LowerThirdRenderer {
                 },
                 onProgress: ({ progress }) => {
                     const pct = Math.round(progress * 100);
-                    // Log every 10%, send to UI every update
-                    if (pct % 10 === 0 || pct === 1 || pct >= 99) {
-                        logInfo(`[LowerThird] Render progress: ${pct}%`);
+                    // Reduced logging - only at 50% and 100%
+                    if (pct === 50 || pct >= 99) {
+                        logInfo(`[LowerThird] seg=${segmentId}: ${pct}%`);
                     }
                     // Always send to UI
                     if (reportProgress) {
@@ -586,9 +588,7 @@ class LowerThirdRenderer {
                     }
                 },
             };
-            
-            logInfo(`[LowerThird] Rendering with: ${gpu.recommended.toUpperCase()} (${gpu.gpuName}, concurrency: ${gpu.concurrency}, profile: ${proResProfile})`);
-            
+
             if (this.browserPath) {
                 renderOptions.browserExecutable = this.browserPath;
             }
@@ -598,14 +598,14 @@ class LowerThirdRenderer {
             // Check if MOV was created
             if (fs.existsSync(outputPath)) {
                 const stats = fs.statSync(outputPath);
-                logInfo(`[LowerThird] ✓ Output: ${outputPath} (${(stats.size / 1024).toFixed(1)} KB)`);
+                logInfo(`[LowerThird] ✓ seg=${segmentId}: ${(stats.size / 1024).toFixed(1)} KB`);
                 return outputPath;
             }
 
             throw new Error('Output file not created');
 
         } catch (error) {
-            logError(`[LowerThird] Render error: ${error.message}`);
+            logError(`[LowerThird] Render error seg=${segmentId}: ${error.message}`);
             throw error;
         }
     }
@@ -725,7 +725,7 @@ class LowerThirdRenderer {
             logError(`[LowerThird] Cleanup failed: ${e.message}`);
         }
     }
-    
+
     /**
      * PRE-RENDER: Queue a lower third for background rendering
      * Call this when a segment is added/updated to render ahead of time
@@ -735,27 +735,27 @@ class LowerThirdRenderer {
         if (!headline || !headline.trim()) {
             return null;
         }
-        
+
         const line1 = headline.length > 50 ? headline.substring(0, 50) : headline;
         const line2 = headline.length > 50 ? headline.substring(50, 100) : '';
-        
+
         const cacheKey = generateCacheKey(line1, line2, durationInSeconds);
-        
+
         // Already cached?
         const cached = getCachedOverlay(cacheKey);
         if (cached) {
             logInfo(`[LowerThird] Pre-render: Already cached ${cacheKey}`);
             return cached;
         }
-        
+
         // Already rendering?
         if (pendingRenders.has(cacheKey)) {
             logInfo(`[LowerThird] Pre-render: Already in progress ${cacheKey}`);
             return pendingRenders.get(cacheKey);
         }
-        
+
         logInfo(`[LowerThird] Pre-render: Starting background render for "${headline.substring(0, 30)}..."`);
-        
+
         // Render in background (don't await - fire and forget)
         try {
             return await this.renderLowerThird({ headline, durationInSeconds, segmentId });
@@ -764,7 +764,7 @@ class LowerThirdRenderer {
             return null;
         }
     }
-    
+
     /**
      * Check if a lower third is already cached
      */
@@ -775,7 +775,7 @@ class LowerThirdRenderer {
         const cacheKey = generateCacheKey(line1, line2, durationInSeconds);
         return getCachedOverlay(cacheKey) !== null;
     }
-    
+
     /**
      * Get cache statistics
      */

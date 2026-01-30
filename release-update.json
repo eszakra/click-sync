@@ -1,0 +1,5 @@
+{
+  "name": "2.0.7 (BETA)",
+  "body": "## 🧪 ClickSync v2.0.7 BETA\n\nEsta es una versión beta con mejoras y correcciones recientes.\n\n### Cambios principales:\n- Correcciones de errores TypeScript\n- Mejoras en la estabilidad del sistema\n- Optimizaciones de rendimiento\n\n⚠️ **Nota:** Esta es una versión beta. Puede contener errores no detectados.\n\n### Assets:\n- ClickSync-Setup-2.0.7.exe - Instalador Windows (x64)\n- ClickSync-Setup-2.0.7.exe.blockmap - Mapa de bloques para actualizaciones\n- latest.yml - Configuración de actualización automática",
+  "prerelease": true
+}

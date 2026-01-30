@@ -40,7 +40,7 @@ export const RemotionRoot: React.FC = () => {
             <Composition
                 id="LowerThird"
                 component={LowerThirdComposition}
-                durationInFrames={90}
+                durationInFrames={80}
                 fps={30}
                 width={1920}
                 height={1080}
@@ -55,7 +55,7 @@ export const RemotionRoot: React.FC = () => {
             <Composition
                 id="SegmentLowerThird"
                 component={LowerThirdComposition}
-                durationInFrames={90}
+                durationInFrames={80}
                 fps={30}
                 width={1920}
                 height={1080}
@@ -65,8 +65,8 @@ export const RemotionRoot: React.FC = () => {
                     durationInSeconds: 3,
                 }}
                 calculateMetadata={({ props }) => {
-                    // Calculate frames based on duration, minimum 90 frames (3 seconds) for animation
-                    const frames = Math.max(90, Math.round((props.durationInSeconds || 3) * 30));
+                    // Calculate frames based on duration, minimum 80 frames (~2.67 seconds) for animation
+                    const frames = Math.max(80, Math.round((props.durationInSeconds || 3) * 30));
                     return {
                         durationInFrames: frames,
                     };
@@ -77,7 +77,7 @@ export const RemotionRoot: React.FC = () => {
             <Composition
                 id="MandatoryCredit"
                 component={MandatoryCreditComposition}
-                durationInFrames={90}
+                durationInFrames={30}
                 fps={30}
                 width={1920}
                 height={1080}
@@ -91,7 +91,7 @@ export const RemotionRoot: React.FC = () => {
             <Composition
                 id="SegmentMandatoryCredit"
                 component={MandatoryCreditComposition}
-                durationInFrames={90}
+                durationInFrames={30}
                 fps={30}
                 width={1920}
                 height={1080}
@@ -100,7 +100,7 @@ export const RemotionRoot: React.FC = () => {
                     durationInSeconds: 3,
                 }}
                 calculateMetadata={({ props }) => {
-                    const frames = Math.max(90, Math.round((props.durationInSeconds || 3) * 30));
+                    const frames = Math.max(30, Math.round((props.durationInSeconds || 1) * 30));
                     return {
                         durationInFrames: frames,
                     };

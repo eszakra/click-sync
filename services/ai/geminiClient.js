@@ -10,8 +10,8 @@ import config from '../../config.js';
 // Default API Key (fallback) - also available in config.js
 const DEFAULT_KEY = config?.gemini?.apiKey || "AIzaSyC0QCO0_h3jb6l2rDV738Rv8hAvf6_5atk";
 
-// Model to use - gemini-2.5-flash has vision support and is fast
-const DEFAULT_MODEL = config?.gemini?.model || "gemini-2.5-flash";
+// Model to use - gemini-3-flash-preview has vision support and is fast
+const DEFAULT_MODEL = config?.gemini?.model || "gemini-3-flash-preview";
 
 // Rate limiting configuration
 const RATE_LIMIT = {
@@ -68,7 +68,7 @@ class GeminiClient {
     init() {
         const apiKey = this.getApiKey();
         this.genAI = new GoogleGenerativeAI(apiKey);
-        // Use gemini-2.0-flash for vision capabilities (faster and cheaper than pro)
+        // Use gemini-3-flash-preview for vision capabilities (faster and cheaper than pro)
         this.model = this.genAI.getGenerativeModel({ model: DEFAULT_MODEL });
         console.log(`[GeminiClient] Initialized with model: ${DEFAULT_MODEL}`);
         return this;

@@ -100,7 +100,7 @@ export function parseScriptBlocks(script: string): ScriptBlock[] {
  */
 async function analyzeGlobalContext(script: string): Promise<GlobalContext> {
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3-pro-preview' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
         const prompt = `Analyze this news script. Extract key entities.
         
 Script: "${script.substring(0, 10000)}"
@@ -132,7 +132,7 @@ async function analyzeBlockForViory(
     previousContext: Partial<BlockAnalysis> | null = null
 ): Promise<BlockAnalysis> {
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3-pro-preview' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
 
         // Build context continuity section
         let continuitySection = '';
@@ -429,7 +429,7 @@ export async function matchVideosToScript(script: string): Promise<BlockWithVide
  */
 export async function generateScriptContext(script: string): Promise<string> {
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3-pro-preview' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
         const prompt = `Actúa como un editor de noticias experto. Analiza este guion y genera un RESUMEN EJECUTIVO MUY BREVE (máximo 2 frases) en ESPAÑOL que explique el contexto general y los protagonistas principales.
         
 Script: "${script.substring(0, 10000)}"
@@ -526,7 +526,7 @@ export async function reSearchBlockWithProgress(
 // --- Title Generation ---
 export const generateProfessionalTitle = async (script: string): Promise<string> => {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
         const prompt = `
         Analyze the following video script and generate a SINGLE, professional, catchy YouTube title.
         

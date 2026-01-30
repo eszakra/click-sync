@@ -12,6 +12,7 @@ export interface ProjectData {
     procState?: any; // ProcessingState
     storyBlocks?: any[]; // StoryBlock[]
     smartTimeline?: any[]; // Timeline with video data
+    timeline?: any[]; // Alias for backward compatibility
     storagePath?: string;
     logs?: string[];
 }

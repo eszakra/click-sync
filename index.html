@@ -81,6 +81,31 @@
   }
 }
 </script>
+  <!-- Guard against MutationObserver errors when window is minimized/restored -->
+  <script>
+    // Wrap MutationObserver to catch errors when DOM is unavailable (minimized window)
+    (function() {
+      if (typeof MutationObserver !== 'undefined') {
+        const OriginalMutationObserver = MutationObserver;
+        window.MutationObserver = function(callback) {
+          const safeCallback = function(mutations, observer) {
+            try {
+              return callback(mutations, observer);
+            } catch (e) {
+              // Silently ignore MutationObserver errors (e.g., when window is minimized)
+              if (e && e.message && e.message.includes('MutationObserver')) {
+                console.debug('[MutationObserver] Suppressed error during minimized state');
+                return;
+              }
+              throw e;
+            }
+          };
+          return new OriginalMutationObserver(safeCallback);
+        };
+        window.MutationObserver.prototype = OriginalMutationObserver.prototype;
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="/index.css">
 </head>
 

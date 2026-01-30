@@ -209,13 +209,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                             ) : progress?.stage === 'generating_overlays' || progress?.stage === 'generating_lower_thirds' ? (
                                 /* Overlays Generation - Clean Unified Design */
                                 (() => {
-                                    // Calculate total progress: (completed overlays + current progress) / total
+                                    // Use the percent directly from backend (already calculated correctly)
+                                    const totalProgress = progress?.percent || 0;
                                     const currentOverlay = progress?.currentOverlay || 1;
                                     const totalOverlays = progress?.totalOverlays || 1;
-                                    const currentRenderProgress = progress?.renderProgress || 0;
-                                    const completedOverlays = currentOverlay - 1;
-                                    const totalProgress = Math.round(((completedOverlays * 100) + currentRenderProgress) / totalOverlays);
-                                    
+                                    const isComplete = progress?.overlayType === 'complete';
+
                                     return (
                                         <>
                                             {/* Total Progress Percentage */}
@@ -230,14 +229,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                                                     <svg className="w-4 h-4 text-[#FF0055]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                                                         <path strokeLinecap="round" strokeLinejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" />
                                                     </svg>
-                                                ) : (
+                                                ) : progress?.overlayType === 'lower_third' ? (
                                                     <svg className="w-4 h-4 text-[#FF0055]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                                                         <rect x="2" y="14" width="20" height="7" rx="2" />
                                                         <line x1="5" y1="17" x2="19" y2="17" strokeLinecap="round" />
                                                     </svg>
+                                                ) : (
+                                                    <svg className="w-4 h-4 text-[#30D158]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                                    </svg>
                                                 )}
                                                 <span className="text-[#888] text-sm">
-                                                    {progress?.overlayType === 'mandatory_credit' ? 'Credit' : 'Lower Third'}
+                                                    {isComplete ? 'Complete' : progress?.overlayType === 'mandatory_credit' ? 'Credit' : 'Lower Third'}
                                                 </span>
                                                 <span className="text-[#555] text-sm font-mono">
                                                     {currentOverlay}/{totalOverlays}
@@ -245,18 +248,20 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                                             </div>
 
                                             {/* Current Text Preview */}
-                                            {(progress?.overlayText || progress?.lowerThirdText) && (
+                                            {progress?.overlayText && (
                                                 <div className="mt-2 max-w-[85%]">
                                                     <p className="text-[#666] text-[11px] truncate text-center">
-                                                        {progress?.overlayText || progress?.lowerThirdText}
+                                                        {progress.overlayText}
                                                     </p>
                                                 </div>
                                             )}
 
                                             {/* Rendering Indicator */}
                                             <div className="mt-4 flex items-center gap-2">
-                                                <div className="w-2 h-2 rounded-full bg-[#FF0055] animate-pulse" />
-                                                <span className="text-[#555] text-xs">Generating overlays</span>
+                                                <div className={`w-2 h-2 rounded-full ${isComplete ? 'bg-[#30D158]' : 'bg-[#FF0055] animate-pulse'}`} />
+                                                <span className="text-[#555] text-xs">
+                                                    {isComplete ? 'Overlays ready' : 'Generating overlays'}
+                                                </span>
                                             </div>
                                         </>
                                     );
@@ -303,31 +308,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                         {/* Progress Bar - Unified style */}
                         <div className="space-y-2">
                             <div className="w-full h-2 bg-[#1a1a1a] rounded-full overflow-hidden">
-                                {(() => {
-                                    // Calculate progress based on stage
-                                    let barProgress = percent;
-                                    if (progress?.stage === 'generating_overlays' || progress?.stage === 'generating_lower_thirds') {
-                                        const currentOverlay = progress?.currentOverlay || 1;
-                                        const totalOverlays = progress?.totalOverlays || 1;
-                                        const currentRenderProgress = progress?.renderProgress || 0;
-                                        const completedOverlays = currentOverlay - 1;
-                                        barProgress = Math.round(((completedOverlays * 100) + currentRenderProgress) / totalOverlays);
-                                    }
-                                    
-                                    return (
-                                        <div
-                                            className="h-full rounded-full transition-all duration-150 ease-out"
-                                            style={{
-                                                width: `${barProgress}%`,
-                                                background: isComplete
-                                                    ? '#30D158'
-                                                    : isError
-                                                        ? '#ef4444'
-                                                        : 'linear-gradient(90deg, #FF0055, #FF3377)'
-                                            }}
-                                        />
-                                    );
-                                })()}
+                                <div
+                                    className="h-full rounded-full transition-all duration-300 ease-out"
+                                    style={{
+                                        width: `${progress?.percent || percent}%`,
+                                        background: isComplete
+                                            ? '#30D158'
+                                            : isError
+                                                ? '#ef4444'
+                                                : 'linear-gradient(90deg, #FF0055, #FF3377)'
+                                    }}
+                                />
                             </div>
                         </div>
 

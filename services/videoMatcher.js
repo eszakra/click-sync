@@ -56,7 +56,7 @@ async function analyzeGlobalContext(script) {
     try {
         // Instantiate lazily to ensure latest key
         const genAI = new GoogleGenerativeAI(getApiKey());
-        const model = genAI.getGenerativeModel({ model: 'gemini-3-pro-preview' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
         const prompt = `Analyze this news script. Extract key entities.
         
 Script: "${script.substring(0, 10000)}"
@@ -80,12 +80,16 @@ OUTPUT JSON ONLY:
 
 /**
  * BLOCK ANALYSIS - Generates SIMPLE, VIORY-FRIENDLY queries with CONTEXT CONTINUITY
+ * @param {Object} block - The block to analyze
+ * @param {Object} globalContext - Global script context
+ * @param {Object} previousContext - Previous block context for continuity
+ * @param {boolean} alternativeQueries - If true, generates alternative/variant queries
  */
-async function analyzeBlockForViory(block, globalContext, previousContext = null) {
+async function analyzeBlockForViory(block, globalContext, previousContext = null, alternativeQueries = false) {
     try {
         // Instantiate lazily to ensure latest key
         const genAI = new GoogleGenerativeAI(getApiKey());
-        const model = genAI.getGenerativeModel({ model: 'gemini-3-pro-preview' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
 
         // Build context continuity section
         let continuitySection = '';
@@ -102,6 +106,15 @@ you should use the SAME main entities. Only switch to new entities if the block 
         }
 
         // Generate queries with EXPLICIT HIERARCHY and CONTINUITY
+        // If alternativeQueries is true, ask for different/variant queries
+        const alternativeSection = alternativeQueries ? `
+ALTERNATIVE QUERY MODE: This is a RE-SEARCH attempt. Generate FRESH, DIFFERENT queries than what might have been tried before.
+- Try different combinations of the same entities
+- Use different action words: "address", "statement", "remarks", "announcement", "interview"
+- Try different angles: location-based, event-based, or broader topic-based
+- Avoid using the exact same word combinations as typical defaults
+` : '';
+
         const prompt = `You are helping search for stock footage. Generate a PRIORITIZED list of 6-8 search queries.
 
 BLOCK TO ANALYZE:
@@ -109,6 +122,7 @@ Block #${block.index + 1}
 Headline: "${block.headline}"
 Paragraph: "${block.text}"
 ${continuitySection}
+${alternativeSection}
 SEARCH HIERARCHY (in order of priority):
 1. If TWO important people are mentioned: search "PersonA PersonB" TOGETHER first
 2. Then search the MOST IMPORTANT person + action (e.g. "Trump speech", "Putin press conference")
@@ -124,7 +138,7 @@ CRITICAL RULES:
 - Identify WHO is the main speaker or subject
 - **If a title/position is mentioned WITHOUT a name (e.g., "the Prime Minister", "the President", "the Foreign Minister"), use the TITLE + COUNTRY or ACTION (e.g., "Chinese Prime Minister", "Prime Minister speech")**
 - Queries must be 2-4 words MAX  
-- Include ACTION variants: "speech", "press conference", "interview", "meeting"
+- Include ACTION variants: "speech", "press conference", "interview", "meeting", "address", "statement"
 - Each query MUST be UNIQUE and DIFFERENT from the others
 - **IF the block is a continuation of the same story/people as the previous block, GENERATE NEW query variants to avoid repetition**
 
@@ -479,7 +493,7 @@ export async function matchVideosToScript(script) {
 export async function generateScriptContext(script) {
     try {
         const genAI = new GoogleGenerativeAI(getApiKey());
-        const model = genAI.getGenerativeModel({ model: 'gemini-3-pro-preview' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
         const prompt = `Actúa como un editor de noticias experto. Analiza este guion y genera un RESUMEN EJECUTIVO MUY BREVE (máximo 2 frases) en ESPAÑOL que explique el contexto general y los protagonistas principales.
         
 Script: "${script.substring(0, 10000)}"
@@ -497,6 +511,8 @@ RESUMEN EN ESPAÑOL:`;
 
 /**
  * Re-search a single block
+ * FIX: Use existing analysis if available, or analyze with proper context
+ * Also tries different queries than before for better results
  */
 export async function reSearchBlock(block, customQuery) {
     const scraper = await getVioryScraper();
@@ -513,8 +529,42 @@ export async function reSearchBlock(block, customQuery) {
         };
     }
 
-    // Re-analyze the block
-    const analysis = await analyzeBlockForViory(block, { theme: "News", main_people: [], main_places: [], main_orgs: [] });
+    let analysis;
+    
+    // FIX: Check if block already has analysis from previous search
+    if (block.analysis && block.analysis.queries && block.analysis.queries.length > 0) {
+        console.log(`[ReSearch] Using existing analysis for block ${block.index}`);
+        analysis = block.analysis;
+        
+        // Try to generate alternative queries by re-analyzing with emphasis on different aspects
+        // This gives us fresh queries while keeping the good context
+        try {
+            const freshAnalysis = await analyzeBlockForViory(
+                block, 
+                { theme: "News", main_people: [], main_places: [], main_orgs: [] },
+                null,
+                true // Request alternative/variant queries
+            );
+            
+            // Merge: keep original queries but add fresh ones that are different
+            const existingQueries = new Set(analysis.queries.map(q => q.toLowerCase()));
+            const newQueries = freshAnalysis.queries.filter(q => !existingQueries.has(q.toLowerCase()));
+            
+            if (newQueries.length > 0) {
+                console.log(`[ReSearch] Adding ${newQueries.length} fresh queries`);
+                analysis = {
+                    ...analysis,
+                    queries: [...analysis.queries, ...newQueries].slice(0, 8) // Max 8 queries
+                };
+            }
+        } catch (e) {
+            console.log(`[ReSearch] Could not generate fresh queries, using existing`);
+        }
+    } else {
+        // No existing analysis, do fresh analysis
+        console.log(`[ReSearch] No existing analysis, performing fresh analysis for block ${block.index}`);
+        analysis = await analyzeBlockForViory(block, { theme: "News", main_people: [], main_places: [], main_orgs: [] });
+    }
 
     const searchResult = await searchBlockWithAggregation(block, analysis, scraper, (status, data) => {
         console.log(`[ReSearch] ${status}:`, data);
@@ -523,6 +573,7 @@ export async function reSearchBlock(block, customQuery) {
     return {
         ...block,
         ...searchResult,
+        analysis, // Preserve the analysis for future re-searches
         searchQuery: searchResult.finalQuery,
         status: searchResult.success ? 'complete' : 'no_results'
     };
@@ -550,13 +601,55 @@ export async function reSearchBlockWithProgress(block, customQuery, onProgress) 
         };
     }
 
-    // Re-analyze the block
-    const analysis = await analyzeBlockForViory(block, { theme: "News", main_people: [], main_places: [], main_orgs: [] });
-
-    onProgress('extracted', {
-        message: `Found: ${analysis.main_person || analysis.institution || 'content'}`,
-        queries: analysis.queries
-    });
+    let analysis;
+    
+    // FIX: Check if block already has analysis from previous search
+    if (block.analysis && block.analysis.queries && block.analysis.queries.length > 0) {
+        console.log(`[ReSearch] Using existing analysis for block ${block.index}`);
+        analysis = block.analysis;
+        onProgress('extracted', {
+            message: `Using previous analysis: ${analysis.main_person || analysis.institution || 'content'}`,
+            queries: analysis.queries
+        });
+        
+        // Try to generate alternative queries by re-analyzing with emphasis on different aspects
+        try {
+            onProgress('generating_queries', { message: 'Generating fresh query variants...' });
+            const freshAnalysis = await analyzeBlockForViory(
+                block, 
+                { theme: "News", main_people: [], main_places: [], main_orgs: [] },
+                null,
+                true // Request alternative/variant queries
+            );
+            
+            // Merge: keep original queries but add fresh ones that are different
+            const existingQueries = new Set(analysis.queries.map(q => q.toLowerCase()));
+            const newQueries = freshAnalysis.queries.filter(q => !existingQueries.has(q.toLowerCase()));
+            
+            if (newQueries.length > 0) {
+                console.log(`[ReSearch] Adding ${newQueries.length} fresh queries`);
+                onProgress('generating_queries', { 
+                    message: `Added ${newQueries.length} fresh query variants`,
+                    queries: [...analysis.queries, ...newQueries]
+                });
+                analysis = {
+                    ...analysis,
+                    queries: [...analysis.queries, ...newQueries].slice(0, 8) // Max 8 queries
+                };
+            }
+        } catch (e) {
+            console.log(`[ReSearch] Could not generate fresh queries, using existing`);
+        }
+    } else {
+        // No existing analysis, do fresh analysis
+        console.log(`[ReSearch] No existing analysis, performing fresh analysis for block ${block.index}`);
+        analysis = await analyzeBlockForViory(block, { theme: "News", main_people: [], main_places: [], main_orgs: [] });
+        
+        onProgress('extracted', {
+            message: `Found: ${analysis.main_person || analysis.institution || 'content'}`,
+            queries: analysis.queries
+        });
+    }
 
     const searchResult = await searchBlockWithAggregation(block, analysis, scraper, (status, data) => {
         onProgress(status, data);
@@ -565,6 +658,7 @@ export async function reSearchBlockWithProgress(block, customQuery, onProgress) 
     return {
         ...block,
         ...searchResult,
+        analysis, // Preserve the analysis for future re-searches
         searchQuery: searchResult.finalQuery,
         status: searchResult.success ? 'complete' : 'no_results'
     };

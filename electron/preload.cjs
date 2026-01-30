@@ -46,6 +46,34 @@ contextBridge.exposeInMainWorld('electron', {
             return () => ipcRenderer.removeListener('viory-session-status', subscription);
         }
     },
+    // Segment Overlay Manager API
+    segmentOverlays: {
+        videoAssigned: (segmentIndex, segmentData) => 
+            ipcRenderer.invoke('segment-video-assigned', { segmentIndex, segmentData }),
+        getStatus: () => ipcRenderer.invoke('segment-overlays-status'),
+        clear: () => ipcRenderer.invoke('segment-overlays-clear'),
+        onRenderComplete: (callback) => {
+            const subscription = (event, data) => callback(data);
+            ipcRenderer.on('overlay-render-complete', subscription);
+            return () => ipcRenderer.removeListener('overlay-render-complete', subscription);
+        },
+        onRenderError: (callback) => {
+            const subscription = (event, data) => callback(data);
+            ipcRenderer.on('overlay-render-error', subscription);
+            return () => ipcRenderer.removeListener('overlay-render-error', subscription);
+        }
+    },
+    // Project Management API
+    projects: {
+        saveState: (projectId) => ipcRenderer.invoke('save-project-state', { projectId }),
+        loadState: (projectId) => ipcRenderer.invoke('load-project-state', { projectId }),
+        clearState: () => ipcRenderer.invoke('clear-project-state'),
+        getCurrent: () => ipcRenderer.invoke('get-current-project'),
+        saveRecovery: (state) => ipcRenderer.invoke('save-recovery-state', state),
+        checkRecovery: () => ipcRenderer.invoke('check-recovery-state'),
+        restoreRecovery: () => ipcRenderer.invoke('restore-from-recovery'),
+        clearRecovery: () => ipcRenderer.invoke('clear-recovery-state')
+    },
     // Auto-update and General IPC
     invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
     on: (channel, func) => {

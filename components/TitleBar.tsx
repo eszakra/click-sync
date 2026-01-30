@@ -2,17 +2,7 @@ import React, { useState, useEffect } from 'react';
 // @ts-ignore
 import { MinusIcon, StopIcon, XMarkIcon } from '@heroicons/react/24/solid';
 
-// Add type for Electron API if not already global
-declare global {
-    interface Window {
-        electronAPI?: {
-            minimize: () => void;
-            maximize: () => void;
-            close: () => void;
-            isElectron: boolean;
-        }
-    }
-}
+// Window interface is defined in vite-env.d.ts
 
 const TitleBar: React.FC = () => {
     const [isMaximized, setIsMaximized] = useState(false);

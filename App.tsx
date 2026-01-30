@@ -65,16 +65,7 @@ interface ProcessingState {
     message: string;
 }
 
-// Extend Window interface for Electron
-declare global {
-    interface Window {
-        electron: {
-            invoke: (channel: string, data?: any) => Promise<any>;
-            on: (channel: string, func: (...args: any[]) => void) => void;
-            removeAllListeners: (channel: string) => void;
-        };
-    }
-}
+// Window interface is defined in vite-env.d.ts
 
 // --- Internal UI Components ---
 
@@ -151,8 +142,8 @@ const ProcessingHero: React.FC<{ state: ProcessingState }> = memo(({ state }) =>
                             </div>
                             <svg className="absolute inset-0 w-10 h-10 -rotate-90" viewBox="0 0 36 36">
                                 <circle cx="18" cy="18" r="16" fill="none" strokeWidth="2" stroke="rgba(255,255,255,0.05)" />
-                                <circle 
-                                    cx="18" cy="18" r="16" fill="none" strokeWidth="2" stroke="#FF0055" 
+                                <circle
+                                    cx="18" cy="18" r="16" fill="none" strokeWidth="2" stroke="#FF0055"
                                     strokeDasharray={`${state.progress} 100`}
                                     strokeLinecap="round"
                                     className="transition-all duration-300"
@@ -173,13 +164,13 @@ const ProcessingHero: React.FC<{ state: ProcessingState }> = memo(({ state }) =>
                     <div className="flex items-center gap-1">
                         {steps.map((step, idx) => (
                             <div key={step.id} className="flex items-center">
-                                <div 
+                                <div
                                     className={`
                                         flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold transition-all duration-300
-                                        ${idx < currentStep 
-                                            ? 'bg-[#FF0055]/20 text-[#FF0055]' 
-                                            : idx === currentStep 
-                                                ? 'bg-white text-black shadow-lg shadow-white/20' 
+                                        ${idx < currentStep
+                                            ? 'bg-[#FF0055]/20 text-[#FF0055]'
+                                            : idx === currentStep
+                                                ? 'bg-white text-black shadow-lg shadow-white/20'
                                                 : 'bg-white/[0.03] text-gray-600'
                                         }
                                     `}
@@ -835,7 +826,7 @@ function App() {
     // UI State
     const [showSettings, setShowSettings] = useState(false);
     const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem('gemini_api_key') || '');
-    
+
     // Viory Login State
     const [vioryLoginRequired, setVioryLoginRequired] = useState(false);
     const [vioryLoginMessage, setVioryLoginMessage] = useState('');
@@ -904,13 +895,13 @@ function App() {
     useEffect(() => {
         if ((window as any).electron) {
             (window as any).electron.receive('smart-timeline-update', (timelineData: any) => {
-                console.log("Received timeline update:", timelineData);
                 const backendSegments = timelineData.segments || [];
 
                 // CRITICAL: Merge backend updates while PRESERVING local approval states
                 setSmartTimeline(prev => {
                     if (prev.length === 0) {
                         // Initial load - use backend data as-is
+                        console.log("[Timeline] Initial timeline with", backendSegments.length, "segments");
                         return backendSegments;
                     }
 
@@ -939,10 +930,10 @@ function App() {
             });
         }
     }, []);
-    
+
     // Track if "all videos ready" notification has been shown for current session
     const allVideosReadyNotifiedRef = useRef(false);
-    
+
     const isRestoringRef = useRef(false);
 
     // AUTO-UPDATE LISTENERS
@@ -1089,7 +1080,7 @@ function App() {
 
         setCurrentProject(proj);
         setScriptText(typeof proj.scriptText === 'string' ? proj.scriptText : "");
-        
+
         // CRITICAL FIX: Set audioFilePath for export - this was missing!
         if (proj.audioPath) {
             console.log('[Restore] Setting audioFilePath:', proj.audioPath);
@@ -1255,7 +1246,7 @@ function App() {
             setCurrentView('editor');
 
             // Trigger video fetching for incomplete segments
-            const hasIncomplete = restoredBlocks.some(b => 
+            const hasIncomplete = restoredBlocks.some(b =>
                 b.videoStatus !== 'complete' && (!b.videoMatches || b.videoMatches.length === 0)
             );
 
@@ -1297,21 +1288,21 @@ function App() {
         setResumeableProject(null); // Clear any resume prompt
         setCurrentProject(newProj);
         setAudioFile(audioFile);
-        
+
         let finalAudioPath = '';
-        
+
         // Variable to hold the actual File object for processing
         let audioFileForProcessing: File = audioFile;
-        
+
         if (audioFile) {
             // Check for native path first (from Electron dialog - like pro editors)
             const nativePath = (audioFile as any).nativePath;
-            
+
             if (nativePath) {
                 // PRO EDITOR STYLE: Use the original file path directly (no copying!)
                 console.log('[handleNewProject] Using native file path (pro editor style):', nativePath);
                 finalAudioPath = nativePath;
-                
+
                 // Read the file from disk for preview AND transcription
                 if ((window as any).electron) {
                     try {
@@ -1321,7 +1312,7 @@ function App() {
                             const blob = new Blob([buffer], { type: 'audio/mpeg' });
                             audioFileForProcessing = new File([blob], audioFile.name, { type: 'audio/mpeg' });
                             (audioFileForProcessing as any).nativePath = nativePath;
-                            
+
                             setMasterAudioUrl(URL.createObjectURL(blob));
                             console.log('[handleNewProject] Audio loaded from native path, size:', buffer.byteLength);
                         }
@@ -1333,7 +1324,7 @@ function App() {
                 // Fallback: Web file input - need to save to disk
                 console.log('[handleNewProject] Web file input detected, saving to disk...');
                 setMasterAudioUrl(URL.createObjectURL(audioFile));
-                
+
                 if ((window as any).electron) {
                     try {
                         const arrayBuffer = await audioFile.arrayBuffer();
@@ -1342,7 +1333,7 @@ function App() {
                             fileName: audioFile.name,
                             projectId: newProj.id
                         });
-                        
+
                         if (result.success && result.path) {
                             finalAudioPath = result.path;
                             console.log('[handleNewProject] Audio saved to:', finalAudioPath);
@@ -1352,13 +1343,13 @@ function App() {
                     }
                 }
             }
-            
+
             setAudioFilePath(finalAudioPath);
             setAudioFile(audioFileForProcessing); // Update with real file data
             newProj.audioPath = finalAudioPath;
             newProj.audioName = audioFile.name;
         }
-        
+
         setScriptText(scriptText);
         setStoryBlocks([]);
         setSmartTimeline([]);
@@ -1500,13 +1491,13 @@ function App() {
         // SAVE SESSION STATE TO MEMORY CACHE
         if (currentProject) {
             console.log('[Session] Caching project state for:', currentProject.name);
-            
+
             // Update project with current audioPath
             const updatedProject = {
                 ...currentProject,
                 audioPath: audioFilePath || currentProject.audioPath
             };
-            
+
             projectCache.current.set(currentProject.id, {
                 project: updatedProject,
                 storyBlocks,
@@ -1518,7 +1509,7 @@ function App() {
                 audioClips,
                 masterAudioUrl
             });
-            
+
             // ALSO save to disk so it persists across app restarts
             await projectService.saveSession({
                 id: currentProject.id,
@@ -1533,7 +1524,7 @@ function App() {
         }
 
         setResumeableProject(null);
-        
+
         // DON'T clear the session - we want to preserve it for reopening
         // await projectService.clearSession(); // REMOVED
 
@@ -1574,7 +1565,7 @@ function App() {
 
     const handleOpenProject = async (proj: ProjectData) => {
         console.log('[handleOpenProject] Opening project:', proj.name, 'id:', proj.id);
-        
+
         // Smart Resume: If opening the exact same project that is currently in memory
         if (currentProject && currentProject.id === proj.id) {
             console.log("[handleOpenProject] Same project already active, just switching view");
@@ -1709,7 +1700,7 @@ function App() {
         if ((window as any).electron) {
             (window as any).electron.receive('viory-status-update', (status: { status: string, message: string }) => {
                 console.log('[App] Viory status update:', status);
-                
+
                 if (status.status === 'waiting_login' || status.status === 'login_required' || status.status === 'navigating_login') {
                     setVioryLoginRequired(true);
                     setVioryLoginMessage(status.message || 'Please log in to Viory in the browser window that opened');
@@ -1738,7 +1729,7 @@ function App() {
         try {
             const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
             const now = ctx.currentTime;
-            
+
             // Create a pleasant two-tone chime
             const playTone = (freq: number, start: number, duration: number) => {
                 const osc = ctx.createOscillator();
@@ -1752,7 +1743,7 @@ function App() {
                 osc.start(now + start);
                 osc.stop(now + start + duration);
             };
-            
+
             // Two-tone chime (C5 and E5)
             playTone(523.25, 0, 0.15);    // C5
             playTone(659.25, 0.1, 0.2);   // E5
@@ -1768,7 +1759,7 @@ function App() {
      */
     const showNotification = useCallback((title: string, body: string) => {
         console.log('[Notification] Showing:', title, body);
-        
+
         // 1. Play notification sound
         playNotificationSound();
 
@@ -1812,14 +1803,14 @@ function App() {
             allVideosReadyNotifiedRef.current = false;
         }
     }, [procState.status]);
-    
+
     // Detect when ALL segments have videos ready and show notification
     useEffect(() => {
         // Only check if we have segments and haven't notified yet
         if (smartTimeline.length === 0 || allVideosReadyNotifiedRef.current) {
             return;
         }
-        
+
         // Check if ALL segments have a video with a valid path/url (status 'ready' or has video)
         const allReady = smartTimeline.every((seg: any) => {
             // A segment is ready if it has video data with a path or previewUrl
@@ -1827,16 +1818,16 @@ function App() {
             const isReady = seg.status === 'ready' || seg.status === 'approved';
             return hasVideo || isReady;
         });
-        
+
         // Also make sure we're not still in the middle of processing
-        const stillProcessing = smartTimeline.some((seg: any) => 
+        const stillProcessing = smartTimeline.some((seg: any) =>
             seg.status === 'searching' || seg.status === 'pending' || seg.status === 'downloading'
         );
-        
+
         if (allReady && !stillProcessing) {
             console.log('[Notification] All videos ready! Showing notification...');
             allVideosReadyNotifiedRef.current = true;
-            
+
             showNotification(
                 'ClickSync - Videos Ready',
                 'All video clips have been found and are ready for review.'
@@ -2298,25 +2289,50 @@ function App() {
     const handleSmartReplace = async (segmentIndex: number) => {
         console.log("Replacing clip for segment", segmentIndex);
         if ((window as any).electron) {
-            await (window as any).electron.invoke('smart-replace-clip', segmentIndex);
+            try {
+                const result = await (window as any).electron.invoke('smart-replace-clip', segmentIndex);
+                if (result && !result.success && result.message) {
+                    addToast('Replace Failed', result.message, 'error');
+                }
+                return result;
+            } catch (err: any) {
+                console.error('handleSmartReplace error:', err);
+                addToast('Error', err?.message || 'Failed to replace clip', 'error');
+                return { success: false, message: err?.message };
+            }
+        }
+        return { success: false, message: 'Electron not available' };
+    };
+
+    const handleSkipSearch = async (segmentIndex: number) => {
+        if ((window as any).electron) {
+            await (window as any).electron.invoke('smart-skip-search', segmentIndex);
         }
     };
 
+    const handleManualVideoUrl = async (segmentIndex: number, videoUrl: string) => {
+        if ((window as any).electron) {
+            return await (window as any).electron.invoke('viory:manual-video', { segmentIndex, videoUrl });
+        }
+        return { success: false, message: 'Electron not available' };
+    };
+
+
     // Track if export complete notification has been shown
     const exportCompleteNotifiedRef = useRef(false);
-    
+
     const handleSmartExport = async (options: any, onProgress: (p: any) => void) => {
         if ((window as any).electron) {
             // Reset notification flag at start of export
             exportCompleteNotifiedRef.current = false;
-            
+
             // Remove any existing listener to prevent duplicates
             (window as any).electron.removeAllListeners('smart-export-progress');
-            
+
             // Listen for progress from main
             (window as any).electron.receive('smart-export-progress', (data: any) => {
                 onProgress(data);
-                
+
                 // Show notification when export completes (only once)
                 if (data.stage === 'complete' && !exportCompleteNotifiedRef.current) {
                     exportCompleteNotifiedRef.current = true;
@@ -2429,32 +2445,32 @@ function App() {
             )}
 
 
-            <div className="pt-8 h-screen box-border">
-                <EditorView
-                    project={{ ...currentProject, logs: projectLogs }}
-                    timeline={{ segments: smartTimeline }}
-                    audioUrl={masterAudioUrl}
-                    audioFilePath={audioFilePath} // Pass real file path for export
-                    audioClips={audioClips}
-                    storyBlocks={storyBlocks}
-                    onUpdateAudioClip={handleUpdateAudioClip}
-                    isProcessing={procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error'}
+            <EditorView
+                project={{ ...currentProject, logs: projectLogs }}
+                timeline={{ segments: smartTimeline }}
+                audioUrl={masterAudioUrl}
+                audioFilePath={audioFilePath} // Pass real file path for export
+                audioClips={audioClips}
+                storyBlocks={storyBlocks}
+                onUpdateAudioClip={handleUpdateAudioClip}
+                isProcessing={procState.status !== 'idle' && procState.status !== 'completed' && procState.status !== 'error'}
 
-                    onReplaceClip={handleSmartReplace}
-                    onApproveSegment={(idx) => {
-                        setSmartTimeline(prev => prev.map((seg, i) =>
-                            i === idx ? { ...seg, status: 'approved' } : seg
-                        ));
-                    }}
-                    onExportFinal={handleSmartExport}
-                    onUpdateClipProperty={(idx, prop, val) => {
-                        if ((window as any).electron) {
-                            (window as any).electron.invoke('smart-update-clip-option', { index: idx, prop, value: val });
-                        }
-                    }}
-                    onBack={handleBackToStart}
-                />
-            </div>
+                onReplaceClip={handleSmartReplace}
+                onSkipSearch={handleSkipSearch}
+                onManualVideoUrl={handleManualVideoUrl}
+                onApproveSegment={(idx) => {
+                    setSmartTimeline(prev => prev.map((seg, i) =>
+                        i === idx ? { ...seg, status: 'approved' } : seg
+                    ));
+                }}
+                onExportFinal={handleSmartExport}
+                onUpdateClipProperty={(idx, prop, val) => {
+                    if ((window as any).electron) {
+                        (window as any).electron.invoke('smart-update-clip-option', { index: idx, prop, value: val });
+                    }
+                }}
+                onBack={handleBackToStart}
+            />
         </div>
     );
 }

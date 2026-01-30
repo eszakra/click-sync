@@ -831,18 +831,15 @@ class VideoEditorEngine {
                 const targetDuration = options.duration;
 
                 // If input is shorter than target, we need to loop
-                // FIX: Calculate exact number of loops needed instead of infinite loop
-                // This prevents frozen frames at the end of the video
+                // stream_loop -1 means infinite, but we can just loop enough times
+                // or use stream_loop before input
                 const shouldLoop = inputDuration < targetDuration;
 
                 if (shouldLoop) {
                     console.log(`[Editor] Video shorter than audio (${inputDuration}s < ${targetDuration}s). Looping.`);
-                    // Calculate exact number of loops needed
-                    const loopCount = Math.ceil(targetDuration / inputDuration);
-                    console.log(`[Editor] Calculated loop count: ${loopCount} (input: ${inputDuration}s, target: ${targetDuration}s)`);
-                    // Use exact loop count instead of -1 (infinite) to prevent frozen frames
+                    // -stream_loop -1 must be BEFORE input
                     command = ffmpeg();
-                    command.inputOption('-stream_loop', loopCount.toString());
+                    command.inputOption('-stream_loop', '-1');
                     command.input(inputPath);
                 }
 
@@ -868,8 +865,7 @@ class VideoEditorEngine {
                     '-c:v', encoder,
                     '-pix_fmt', 'yuv420p',
                     '-avoid_negative_ts', 'make_zero',
-                    '-video_track_timescale', '30000',  // Consistent timescale for smooth concat
-                    '-shortest'           // CRITICAL: Ensure output ends at target duration, prevents frozen frames
+                    '-video_track_timescale', '30000'  // Consistent timescale for smooth concat
                 ];
 
                 // Add encoder-specific options
@@ -941,7 +937,7 @@ class VideoEditorEngine {
         return new Promise((resolve, reject) => {
             let command = ffmpeg()
                 .input(listPath)
-                .inputOptions(['-f', 'concat', '-safe', '0', '-auto_convert', '1']);
+                .inputOptions(['-f', 'concat', '-safe', '0']);
 
             // Check for logo (getLogoPath returns a safe path without spaces)
             const logoPath = this.getLogoPath();
@@ -1091,20 +1087,13 @@ class VideoEditorEngine {
 
         ExportLogger.info('TIMELINE', `Clips: ${sortedClips.length}`);
 
-        // Initialize pre-rendered segments variables
-        // The actual check happens after initialization (see below)
-        let usePreRenderedSegments = false;
-        let preRenderedClipList = [];
-
         // Prepare list with robust path handling
         const listPath = path.join(this.tempDir, 'final_list.txt');
 
         // Helper to safely format paths for ffmpeg concat demuxer
         // 1. Convert backslashes to forward slashes
         // 2. Escape single quotes (which enclose the path)
-        // Use preRenderedClipList if available (contains pre-rendered segments with overlays)
-        const clipsToUse = preRenderedClipList.length > 0 ? preRenderedClipList : sortedClips;
-        const listContent = clipsToUse.map(c => {
+        const listContent = sortedClips.map(c => {
             if (!c.processedVideo && !c.videoPath) return null;
             let p = c.processedVideo || c.videoPath;
             // Ensure absolute path
@@ -1127,13 +1116,12 @@ class VideoEditorEngine {
         // Log timeline details
         timelineLog('========== TIMELINE CLIPS ==========');
         let totalExpectedDuration = 0;
-        clipsToUse.forEach((clip, i) => {
+        sortedClips.forEach((clip, i) => {
             const actualDur = clip.duration || 0;
             const expectedDur = clip.expectedDuration || actualDur;
             totalExpectedDuration += actualDur;
-            const preRenderFlag = clip.isPreRendered ? ' [PRE-RENDERED]' : '';
-            timelineLog(`Clip ${i}: idx=${clip.index}, duration=${actualDur.toFixed(2)}s (expected: ${expectedDur.toFixed(2)}s), file=${path.basename(clip.processedVideo || 'N/A')}${preRenderFlag}`);
-            ExportLogger.info('TIMELINE', `Clip ${i}: ${actualDur.toFixed(2)}s - ${path.basename(clip.processedVideo || 'N/A')}${preRenderFlag}`);
+            timelineLog(`Clip ${i}: idx=${clip.index}, duration=${actualDur.toFixed(2)}s (expected: ${expectedDur.toFixed(2)}s), file=${path.basename(clip.processedVideo || 'N/A')}`);
+            ExportLogger.info('TIMELINE', `Clip ${i}: ${actualDur.toFixed(2)}s - ${path.basename(clip.processedVideo || 'N/A')}`);
             ExportLogger.logFile(`Clip ${i}`, clip.processedVideo || clip.videoPath);
         });
         timelineLog(`Total timeline duration: ${totalExpectedDuration.toFixed(2)}s`);
@@ -1142,87 +1130,6 @@ class VideoEditorEngine {
         exportLog(`Concat list: ${sortedClips.length} clips, total duration: ${totalExpectedDuration.toFixed(2)}s`);
 
         ExportLogger.endPhase('INITIALIZATION');
-        
-        // ============ PRE-RENDERED SEGMENTS CHECK ============
-        // CRITICAL FIX: Properly validate pre-rendered segments match current videos
-        // Previously, this only checked segment index, causing wrong videos to be used
-        try {
-            const cacheDir = path.join(os.homedir(), 'ClickStudio', 'Temp', 'prerendered-segments');
-            
-            if (fs.existsSync(cacheDir)) {
-                const files = fs.readdirSync(cacheDir);
-                let foundPreRendered = 0;
-                
-                // Check for pre-rendered segment for each clip
-                for (let i = 0; i < sortedClips.length; i++) {
-                    const clip = sortedClips[i];
-                    // FIX: Get segment data from segments array, not from clip (clips don't have headline/credit)
-                    const seg = segments && segments[i] ? segments[i] : null;
-                    
-                    // Generate expected hash for this clip to find matching cached file
-                    const crypto = await import('crypto');
-                    // FIX: Use the same path format as pre-rendering (file URL format)
-                    // Pre-rendering uses segment.video.url which is a file:// URL
-                    const videoPath = seg && seg.video ? seg.video.url : (clip.processedVideo || clip.videoPath || '');
-                    // FIX: Use segment data for headline and credit, not clip data
-                    const headline = seg ? (seg.headline || seg.title || '') : '';
-                    const credit = seg ? (seg.mandatoryCredit || '') : '';
-                    // FIX: Use segment.video.duration (verified duration) for hash consistency
-                    // This matches the duration used during pre-rendering
-                    const duration = seg && seg.video ? seg.video.duration : (clip.duration || 5);
-                    // FIX: Normalize duration to 1 decimal place to match pre-render hash calculation
-                    const normalizedDuration = typeof duration === 'number' ? duration.toFixed(1) : parseFloat(duration).toFixed(1);
-                    const hashData = `${videoPath}|${headline}|${credit}|${normalizedDuration}`;
-                    const expectedHash = crypto.createHash('md5').update(hashData).digest('hex').substring(0, 16);
-                    
-                    // Look for file matching BOTH segment index AND content hash
-                    const segmentFile = files.find(f => {
-                        if (!f.startsWith(`segment_${i}_`) || !f.endsWith('.mp4')) return false;
-                        // Extract hash from filename: segment_{index}_{hash}.mp4
-                        const parts = f.replace('.mp4', '').split('_');
-                        if (parts.length >= 3) {
-                            const fileHash = parts[2];
-                            return fileHash === expectedHash;
-                        }
-                        return false;
-                    });
-                    
-                    if (segmentFile) {
-                        const fullPath = path.join(cacheDir, segmentFile);
-                        if (fs.existsSync(fullPath)) {
-                            preRenderedClipList.push({
-                                ...clip,
-                                processedVideo: fullPath,
-                                isPreRendered: true
-                            });
-                            foundPreRendered++;
-                            exportLog(`✅ Using pre-rendered segment ${i} (hash: ${expectedHash})`);
-                        } else {
-                            preRenderedClipList.push(clip);
-                            exportLog(`⚠️ Pre-rendered file missing for segment ${i}, using original`);
-                        }
-                    } else {
-                        preRenderedClipList.push(clip);
-                        exportLog(`ℹ️ No matching pre-rendered segment ${i} found (hash: ${expectedHash}), using original`);
-                    }
-                }
-                
-                // Only use pre-rendered if ALL segments are available
-                if (foundPreRendered === sortedClips.length) {
-                    usePreRenderedSegments = true;
-                    exportLog(`✅ Using ${foundPreRendered} pre-rendered segments (video + overlays already combined)`);
-                    ExportLogger.info('PRERENDER', `Using ${foundPreRendered} pre-rendered segments`);
-                } else if (foundPreRendered > 0) {
-                    exportLog(`⚠️ Found ${foundPreRendered}/${sortedClips.length} pre-rendered segments, using mixed mode`);
-                    ExportLogger.info('PRERENDER', `Mixed mode: ${foundPreRendered} pre-rendered + ${sortedClips.length - foundPreRendered} traditional`);
-                } else {
-                    exportLog(`ℹ️ No pre-rendered segments found, using traditional export`);
-                }
-            }
-        } catch (e) {
-            exportLog(`⚠️ Error checking pre-rendered segments: ${e.message}`);
-        }
-        // ============ END PRE-RENDERED SEGMENTS CHECK ============
 
         // Validate that we have clips to export
         if (!listContent || listContent.trim().length === 0) {
@@ -1259,12 +1166,6 @@ class VideoEditorEngine {
             segmentsWithHeadline = segments.filter(s => s.headline || s.title).length;
             totalOverlays += segmentsWithHeadline;
         }
-        
-        // FIX: Also count mandatory credits for totalOverlays
-        if (enableMandatoryCredits && segments) {
-            segmentsWithCredit = segments.filter(s => s.mandatoryCredit && s.mandatoryCredit.trim()).length;
-            totalOverlays += segmentsWithCredit;
-        }
 
 
         // DEBUG: Dump all segments credit status
@@ -1276,16 +1177,7 @@ class VideoEditorEngine {
         }
 
 
-        // Skip overlay generation if using pre-rendered segments (overlays already baked in)
-        if (usePreRenderedSegments && totalOverlays > 0) {
-            exportLog(`✅ Skipping overlay generation - using pre-rendered segments with overlays baked in`);
-            ExportLogger.info('OVERLAYS', 'Skipped - using pre-rendered segments');
-            onProgress({
-                stage: 'using_prerendered',
-                percent: 100,
-                message: 'Using pre-rendered segments with overlays'
-            });
-        } else if (totalOverlays > 0) {
+        if (totalOverlays > 0) {
             ExportLogger.startPhase('OVERLAYS');
             ExportLogger.info('OVERLAYS', `Generating ${totalOverlays} overlays (${segmentsWithHeadline} lower thirds, ${segmentsWithCredit} mandatory credits) - PARALLEL MODE`);
 
@@ -1393,23 +1285,19 @@ class VideoEditorEngine {
             editorLog(`[OVERLAY] Starting parallel rendering with concurrency limit: ${PARALLEL_OVERLAY_LIMIT}`);
 
             // Helper function to send throttled progress updates
-            // FIX: Use overlayTasks.length instead of totalOverlays for accurate counting
-            const totalTasks = overlayTasks.length;
             const sendProgressUpdate = (task, renderPercent) => {
                 const now = Date.now();
                 if (now - lastProgressUpdate < PROGRESS_UPDATE_THROTTLE) return;
                 lastProgressUpdate = now;
 
-                // FIX: Calculate percentage based on actual task array length, not filtered count
-                // completedCount = finished tasks, renderPercent = current task progress (0-100)
-                // Weight: completed tasks count fully, current task counts partially
-                const totalPercent = Math.min(100, Math.round(((completedCount * 100) + renderPercent) / totalTasks));
+                // Calculate total percentage: completed tasks + current task progress
+                const totalPercent = Math.round(((completedCount * 100) + renderPercent) / totalOverlays);
 
                 onProgress({
                     stage: 'generating_overlays',
                     percent: totalPercent,
-                    totalOverlays: totalTasks,  // FIX: Use actual task count
-                    currentOverlay: Math.min(completedCount + 1, totalTasks),  // FIX: Cap at total
+                    totalOverlays,
+                    currentOverlay: completedCount + 1,
                     overlayType: task.type,
                     overlayText: task.text.substring(0, 50) + (task.text.length > 50 ? '...' : ''),
                     segmentIndex: task.segmentIndex + 1,
@@ -1587,7 +1475,7 @@ class VideoEditorEngine {
         return new Promise((resolve, reject) => {
             let command = ffmpeg()
                 .input(listPath)
-                .inputOptions(['-f', 'concat', '-safe', '0', '-auto_convert', '1']);
+                .inputOptions(['-f', 'concat', '-safe', '0']);
 
             // Store reference for cancellation
             this.currentExportCommand = command;
@@ -1692,22 +1580,13 @@ class VideoEditorEngine {
             filterParts.push(`[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1[scaled]`);
 
             // Step 1.5: Add vignette effect (subtle darkening at edges, appears BEHIND all overlays)
-            // CRITICAL: Only apply vignette if NOT using pre-rendered segments
-            // Pre-rendered segments already have vignette baked in during pre-rendering
-            if (!usePreRenderedSegments) {
-                // Split video, apply vignette to one, blend at reduced opacity for subtle effect
-                // OPTIMIZED: Reduced from 0.15 to 0.10 for softer vignette
-                // ORIGINAL: all_opacity=0.15
-                filterParts.push(`[scaled]split[vig_base][vig_src]`);
-                filterParts.push(`[vig_src]vignette=angle=PI/4[vig_dark]`);
-                filterParts.push(`[vig_base][vig_dark]blend=all_mode=normal:all_opacity=0.10[vignetted]`);
-                currentOutput = 'vignetted';
-                exportLog('Applied vignette effect (not using pre-rendered segments)');
-            } else {
-                // Skip vignette - already applied during pre-rendering
-                currentOutput = 'scaled';
-                exportLog('Skipped vignette (using pre-rendered segments with vignette already applied)');
-            }
+            // Split video, apply vignette to one, blend at reduced opacity for subtle effect
+            // OPTIMIZED: Reduced from 0.15 to 0.10 for softer vignette
+            // ORIGINAL: all_opacity=0.15
+            filterParts.push(`[scaled]split[vig_base][vig_src]`);
+            filterParts.push(`[vig_src]vignette=angle=PI/4[vig_dark]`);
+            filterParts.push(`[vig_base][vig_dark]blend=all_mode=normal:all_opacity=0.10[vignetted]`);
+            currentOutput = 'vignetted';
 
             // Step 2: Apply logo (if exists)
             if (hasLogo) {
@@ -2046,7 +1925,7 @@ class VideoEditorEngine {
         return new Promise((resolve, reject) => {
             ffmpeg()
                 .input(listPath)
-                .inputOptions(['-f', 'concat', '-safe', '0', '-auto_convert', '1'])
+                .inputOptions(['-f', 'concat', '-safe', '0'])
                 .outputOptions([
                     '-c', 'copy', // Stream copy for speed (assuming same format)
                     '-movflags', '+faststart'
@@ -2070,7 +1949,7 @@ class VideoEditorEngine {
         return new Promise((resolve, reject) => {
             ffmpeg()
                 .input(listPath)
-                .inputOptions(['-f', 'concat', '-safe', '0', '-auto_convert', '1'])
+                .inputOptions(['-f', 'concat', '-safe', '0'])
                 .outputOptions([
                     '-c:v', 'libx264',
                     '-preset', 'ultrafast',

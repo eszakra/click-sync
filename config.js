@@ -8,8 +8,8 @@ const __dirname = path.dirname(__filename);
 const config = {
     gemini: {
         apiKey: process.env.GEMINI_API_KEY || "AIzaSyC0QCO0_h3jb6l2rDV738Rv8hAvf6_5atk", // Default key
-model: "gemini-2.5-flash", // Fast model with vision support
-        modelPro: "gemini-2.5-pro", // Pro model for complex analysis
+model: "gemini-3-flash-preview", // Fast model with vision support
+        modelPro: "gemini-3-flash-preview", // Pro model for complex analysis
         maxRetries: 3,
         rateLimitPerMinute: 15
     },
