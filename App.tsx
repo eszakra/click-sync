@@ -825,16 +825,34 @@ function App() {
 
     // UI State
     const [showSettings, setShowSettings] = useState(false);
-    const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem('gemini_api_key') || '');
+    const [apiKeyInput, setApiKeyInput] = useState('');
+    const [isUsingCustomKey, setIsUsingCustomKey] = useState(false);
 
     // Viory Login State
     const [vioryLoginRequired, setVioryLoginRequired] = useState(false);
     const [vioryLoginMessage, setVioryLoginMessage] = useState('');
 
-    // Save API Key on change
+    // Load Gemini API key from Electron config when settings modal opens
     useEffect(() => {
-        localStorage.setItem('gemini_api_key', apiKeyInput);
-    }, [apiKeyInput]);
+        if (showSettings && (window as any).electron?.config) {
+            (window as any).electron.config.getGeminiKey().then((result: any) => {
+                if (result.success && result.key) {
+                    setApiKeyInput(result.key);
+                    setIsUsingCustomKey(result.isCustom);
+                } else {
+                    // Fallback to localStorage if Electron config fails
+                    const localKey = localStorage.getItem('gemini_api_key') || '';
+                    setApiKeyInput(localKey);
+                    setIsUsingCustomKey(false);
+                }
+            }).catch(() => {
+                // Fallback to localStorage
+                const localKey = localStorage.getItem('gemini_api_key') || '';
+                setApiKeyInput(localKey);
+                setIsUsingCustomKey(false);
+            });
+        }
+    }, [showSettings]);
 
     // --- PROJECT MANAGEMENT STATE ---
     const [currentView, setCurrentView] = useState<'start' | 'editor' | 'smart_editor'>('start');
@@ -1648,13 +1666,27 @@ function App() {
 
     // --- API Key Management ---
 
-    const updateApiKey = async () => {
+    const updateApiKey = async (): Promise<{ success: boolean; message: string }> => {
         if (!apiKeyInput || apiKeyInput.length < 10) {
-            addToast('Invalid Key', 'Please enter a valid Gemini API Key', 'error');
-            return;
+            return { success: false, message: 'Please enter a valid Gemini API Key (at least 10 characters)' };
         }
 
         try {
+            // Try Electron IPC first (preferred method for packaged app)
+            if ((window as any).electron?.config) {
+                const result = await (window as any).electron.config.saveGeminiKey(apiKeyInput);
+                if (result.success) {
+                    setIsUsingCustomKey(true);
+                    // Also save to localStorage as backup
+                    localStorage.setItem('gemini_api_key', apiKeyInput);
+                    addToast('Key Updated', 'API Key saved successfully. Changes take effect immediately.', 'success');
+                    return { success: true, message: 'API Key saved successfully!' };
+                } else {
+                    return { success: false, message: result.error || 'Failed to save API key' };
+                }
+            }
+
+            // Fallback to HTTP API (for dev mode or web version)
             const res = await fetch(`${API_BASE_URL}/api/config/key`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1663,14 +1695,16 @@ function App() {
 
             const data = await res.json();
             if (data.success) {
-                addToast('Key Updated', 'API Key saved successfully. Restart NOT required.', 'success');
-                setShowSettings(false);
-                setApiKeyInput('');
+                setIsUsingCustomKey(true);
+                localStorage.setItem('gemini_api_key', apiKeyInput);
+                addToast('Key Updated', 'API Key saved successfully. Changes take effect immediately.', 'success');
+                return { success: true, message: 'API Key saved successfully!' };
             } else {
-                throw new Error(data.error);
+                return { success: false, message: data.error || 'Failed to save API key' };
             }
         } catch (e: any) {
-            addToast('Update Failed', e.message, 'error');
+            console.error('[App] Failed to save API key:', e);
+            return { success: false, message: e.message || 'Failed to save API key' };
         }
     };
 
@@ -2398,7 +2432,9 @@ function App() {
                     onClose={() => setShowSettings(false)}
                     apiKey={apiKeyInput}
                     onApiKeyChange={setApiKeyInput}
-                    version="v1.0.9 Unified Studio"
+                    onSaveKey={updateApiKey}
+                    version="v2.0.8"
+                    isUsingCustomKey={isUsingCustomKey}
                 />
             </>
         );

@@ -1359,6 +1359,66 @@ ipcMain.handle('check-audio-file', async (event, audioPath) => {
     }
 });
 
+// IPC handler to save Gemini API key to config file
+ipcMain.handle('save-gemini-api-key', async (event, apiKey) => {
+    try {
+        if (!apiKey || apiKey.length < 10) {
+            return { success: false, error: 'Invalid API key' };
+        }
+
+        const configDir = path.join(os.homedir(), '.clicksync');
+        if (!fs.existsSync(configDir)) {
+            fs.mkdirSync(configDir, { recursive: true });
+        }
+
+        const configPath = path.join(configDir, 'config.json');
+
+        // Read existing config or create new
+        let config = {};
+        if (fs.existsSync(configPath)) {
+            try {
+                config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            } catch (e) {
+                console.warn('[Main] Could not parse existing config, creating new');
+                config = {};
+            }
+        }
+
+        // Update key
+        config.geminiKey = apiKey.trim();
+
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+        console.log(`[Main] Gemini API Key saved to ${configPath}`);
+
+        // Reinitialize Gemini with the new key
+        geminiInitialized = false;
+        await initGemini();
+
+        return { success: true };
+    } catch (e) {
+        console.error('[Main] Failed to save Gemini API key:', e);
+        return { success: false, error: e.message };
+    }
+});
+
+// IPC handler to get current Gemini API key (masked for security)
+ipcMain.handle('get-gemini-api-key', async () => {
+    try {
+        const configPath = path.join(os.homedir(), '.clicksync', 'config.json');
+        if (fs.existsSync(configPath)) {
+            const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            if (data.geminiKey && data.geminiKey.trim().length > 10) {
+                // Return the actual key so the UI can display it
+                return { success: true, key: data.geminiKey.trim(), isCustom: true };
+            }
+        }
+        return { success: true, key: '', isCustom: false };
+    } catch (e) {
+        console.error('[Main] Failed to get Gemini API key:', e);
+        return { success: false, error: e.message, key: '', isCustom: false };
+    }
+});
+
 // --- PROJECT STATE MANAGEMENT ---
 const PROJECT_STATE_FILE = 'clicksync_project_state';
 

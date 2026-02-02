@@ -27,6 +27,11 @@ contextBridge.exposeInMainWorld('electron', {
         set: (key, value) => ipcRenderer.invoke('storage-set', key, value),
         remove: (key) => ipcRenderer.invoke('storage-remove', key)
     },
+    // Config API for Gemini API key management
+    config: {
+        saveGeminiKey: (apiKey) => ipcRenderer.invoke('save-gemini-api-key', apiKey),
+        getGeminiKey: () => ipcRenderer.invoke('get-gemini-api-key')
+    },
     tray: {
         updateProgress: (data) => ipcRenderer.send('update-tray-progress', data)
     },
