@@ -90,31 +90,8 @@ jobs:
           npx electron-builder --mac --${{ matrix.arch }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Skip Apple code signing (no Developer ID)
+          # Skip Apple code signing - afterSign.cjs hook will apply ad-hoc signing
           CSC_IDENTITY_AUTO_DISCOVERY: false
-
-      - name: Ad-hoc sign the app (fixes Gatekeeper "damaged" error)
-        run: |
-          echo "=== Finding .app bundle ==="
-          APP_PATH=$(find release -name "ClickSync.app" -type d | head -1)
-          
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: ClickSync.app not found in release/"
-            find release -type d -maxdepth 3
-            exit 1
-          fi
-          
-          echo "Found app at: $APP_PATH"
-          
-          # Remove any existing signatures first
-          codesign --remove-signature "$APP_PATH" 2>/dev/null || true
-          
-          # Ad-hoc sign the entire app bundle (deep signs all nested binaries)
-          codesign --force --deep --sign - "$APP_PATH"
-          
-          echo "=== Verifying signature ==="
-          codesign --verify --verbose "$APP_PATH"
-          echo "Ad-hoc signing complete!"
 
       - name: List build output
         run: |

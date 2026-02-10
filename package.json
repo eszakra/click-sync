@@ -70,6 +70,7 @@
   "build": {
     "appId": "com.clicksync.app",
     "productName": "ClickSync",
+    "afterSign": "./build/afterSign.cjs",
     "directories": {
       "output": "release"
     },
