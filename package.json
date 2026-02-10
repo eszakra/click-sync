@@ -159,6 +159,8 @@
       ],
       "icon": "public/logo.png",
       "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
       "category": "public.app-category.video",
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
