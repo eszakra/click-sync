@@ -511,6 +511,70 @@ const ResultBlockItem: React.FC<{
 
     const isPlaying = playingId === block.blobUrl;
 
+    // Helper to format title into 3 lines (used for display and copy)
+    const formatTitleToLines = (title: string): string[] => {
+        const text = title || "";
+        const clean = text.replace(/\s+/g, ' ').trim();
+        let lines = ["", "", ""];
+
+        // 1. Try splitting by major punctuation
+        const parts = clean.split(/—|:| - /).map(s => s.trim()).filter(Boolean);
+
+        if (parts.length >= 3) {
+            lines = parts.slice(0, 3);
+        } else if (parts.length === 2) {
+            // Split the longer part
+            const [p1, p2] = parts;
+            if (p1.length > p2.length * 1.5) {
+                // Split p1
+                const mid = Math.floor(p1.length / 2);
+                const splitIdx = p1.lastIndexOf(' ', mid);
+                lines = [
+                    p1.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
+                    p1.substring(splitIdx === -1 ? mid : splitIdx).trim(),
+                    p2
+                ];
+            } else {
+                // Split p2 or keep balanced
+                const mid = Math.floor(p2.length / 2);
+                const splitIdx = p2.lastIndexOf(' ', mid);
+                lines = [
+                    p1,
+                    p2.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
+                    p2.substring(splitIdx === -1 ? mid : splitIdx).trim()
+                ];
+            }
+        } else {
+            // No punctuation, split by length into 3
+            const words = clean.split(' ');
+            if (words.length <= 3) {
+                lines = [words[0] || "", words[1] || "", words[2] || ""];
+            } else {
+                const targetLen = clean.length / 3;
+                let current = "";
+                let lineIdx = 0;
+
+                words.forEach(word => {
+                    if (lineIdx >= 2) {
+                        lines[2] += (lines[2] ? " " : "") + word;
+                    } else {
+                        if ((current.length + word.length) > targetLen && current.length > 0) {
+                            lines[lineIdx] = current;
+                            current = word;
+                            lineIdx++;
+                        } else {
+                            current += (current ? " " : "") + word;
+                        }
+                    }
+                });
+                if (lineIdx < 3) lines[lineIdx] = current;
+            }
+        }
+        return lines;
+    };
+
+    const titleLines = formatTitleToLines(block.title);
+
     return (
         <LiquidCard className={`!p-0 border-white/5 overflow-hidden ${isPlaying ? 'ring-1 ring-[#FF0055]/50' : ''}`}>
             <div className="p-4 border-b border-white/5 bg-white/5 flex items-center justify-between gap-4">
@@ -519,158 +583,28 @@ const ResultBlockItem: React.FC<{
                         {blockIndex + 1}
                     </div>
                     <div className="flex flex-col justify-center min-h-[3em] flex-1">
-                        {(() => {
-                            // Helper to format title into 3 lines
-                            const formatTitleToLines = (title: string): string[] => {
-                                const text = title || "";
-                                const clean = text.replace(/\s+/g, ' ').trim();
-                                let lines = ["", "", ""];
-
-                                // 1. Try splitting by major punctuation
-                                const parts = clean.split(/—|:| - /).map(s => s.trim()).filter(Boolean);
-
-                                if (parts.length >= 3) {
-                                    lines = parts.slice(0, 3);
-                                } else if (parts.length === 2) {
-                                    // Split the longer part
-                                    const [p1, p2] = parts;
-                                    if (p1.length > p2.length * 1.5) {
-                                        // Split p1
-                                        const mid = Math.floor(p1.length / 2);
-                                        const splitIdx = p1.lastIndexOf(' ', mid);
-                                        lines = [
-                                            p1.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
-                                            p1.substring(splitIdx === -1 ? mid : splitIdx).trim(),
-                                            p2
-                                        ];
-                                    } else {
-                                        // Split p2 or keep balanced
-                                        const mid = Math.floor(p2.length / 2);
-                                        const splitIdx = p2.lastIndexOf(' ', mid);
-                                        lines = [
-                                            p1,
-                                            p2.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
-                                            p2.substring(splitIdx === -1 ? mid : splitIdx).trim()
-                                        ];
-                                    }
-                                } else {
-                                    // No punctuation, split by length into 3
-                                    const words = clean.split(' ');
-                                    if (words.length <= 3) {
-                                        lines = [words[0] || "", words[1] || "", words[2] || ""];
-                                    } else {
-                                        const targetLen = clean.length / 3;
-                                        let current = "";
-                                        let lineIdx = 0;
-
-                                        words.forEach(word => {
-                                            if (lineIdx >= 2) {
-                                                lines[2] += (lines[2] ? " " : "") + word;
-                                            } else {
-                                                if ((current.length + word.length) > targetLen && current.length > 0) {
-                                                    lines[lineIdx] = current;
-                                                    current = word;
-                                                    lineIdx++;
-                                                } else {
-                                                    current += (current ? " " : "") + word;
-                                                }
-                                            }
-                                        });
-                                        if (lineIdx < 3) lines[lineIdx] = current;
-                                    }
-                                }
-                                return lines;
-                            };
-
-                            const lines = formatTitleToLines(block.title);
-
-                            return (
-                                <>
-                                    {lines.map((line, i) => (
-                                        <span key={i} className={`block text-xs font-bold text-white tracking-wide uppercase leading-snug ${!line ? 'invisible' : ''} ${i === 0 ? 'text-white/95' : i === 1 ? 'text-white/85' : 'text-white/75'}`}>
-                                            {line || "-"}
-                                        </span>
-                                    ))}
-                                </>
-                            );
-                        })()}
+                        {titleLines.map((line, i) => (
+                            <span key={i} className={`block text-xs font-bold text-white tracking-wide uppercase leading-snug ${!line ? 'invisible' : ''} ${i === 0 ? 'text-white/95' : i === 1 ? 'text-white/85' : 'text-white/75'}`}>
+                                {line || "-"}
+                            </span>
+                        ))}
                     </div>
 
-                    {/* Copy Button (Right Side) - Now uses the same formatting logic */}
-                    {(() => {
-                        // We need to re-calculate lines for the button click, or ideally hoist the calculator. 
-                        // To keep it simple and safe within this structure:
-                        const formatTitleToLines = (title: string): string[] => {
-                            const text = title || "";
-                            const clean = text.replace(/\s+/g, ' ').trim();
-                            let lines = ["", "", ""];
-                            const parts = clean.split(/—|:| - /).map(s => s.trim()).filter(Boolean);
-                            if (parts.length >= 3) {
-                                lines = parts.slice(0, 3);
-                            } else if (parts.length === 2) {
-                                const [p1, p2] = parts;
-                                if (p1.length > p2.length * 1.5) {
-                                    const mid = Math.floor(p1.length / 2);
-                                    const splitIdx = p1.lastIndexOf(' ', mid);
-                                    lines = [
-                                        p1.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
-                                        p1.substring(splitIdx === -1 ? mid : splitIdx).trim(),
-                                        p2
-                                    ];
-                                } else {
-                                    const mid = Math.floor(p2.length / 2);
-                                    const splitIdx = p2.lastIndexOf(' ', mid);
-                                    lines = [
-                                        p1,
-                                        p2.substring(0, splitIdx === -1 ? mid : splitIdx).trim(),
-                                        p2.substring(splitIdx === -1 ? mid : splitIdx).trim()
-                                    ];
-                                }
-                            } else {
-                                const words = clean.split(' ');
-                                if (words.length <= 3) {
-                                    lines = [words[0] || "", words[1] || "", words[2] || ""];
-                                } else {
-                                    const targetLen = clean.length / 3;
-                                    let current = "";
-                                    let lineIdx = 0;
-                                    words.forEach(word => {
-                                        if (lineIdx >= 2) {
-                                            lines[2] += (lines[2] ? " " : "") + word;
-                                        } else {
-                                            if ((current.length + word.length) > targetLen && current.length > 0) {
-                                                lines[lineIdx] = current;
-                                                current = word;
-                                                lineIdx++;
-                                            } else {
-                                                current += (current ? " " : "") + word;
-                                            }
-                                        }
-                                    });
-                                    if (lineIdx < 3) lines[lineIdx] = current;
-                                }
-                            }
-                            return lines;
-                        };
-
-                        return (
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    const lines = formatTitleToLines(block.title);
-                                    const formattedText = lines.filter(l => l).join('\n');
-                                    navigator.clipboard.writeText(formattedText);
-                                }}
-                                className="p-1.5 text-gray-500 hover:text-white rounded-md hover:bg-white/10 transition-colors group/copy relative shrink-0"
-                                title="Copy Formatted Title"
-                            >
-                                <ClipboardIcon className="w-4 h-4" />
-                                <span className="absolute -top-8 left-1/2 -translate-x-1/2 bg-black text-white text-[9px] px-2 py-1 rounded opacity-0 group-active/copy:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-                                    Copied!
-                                </span>
-                            </button>
-                        );
-                    })()}
+                    {/* Copy Button (Right Side) */}
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            const formattedText = titleLines.filter(l => l).join('\n');
+                            navigator.clipboard.writeText(formattedText);
+                        }}
+                        className="p-1.5 text-gray-500 hover:text-white rounded-md hover:bg-white/10 transition-colors group/copy relative shrink-0"
+                        title="Copy Formatted Title"
+                    >
+                        <ClipboardIcon className="w-4 h-4" />
+                        <span className="absolute -top-8 left-1/2 -translate-x-1/2 bg-black text-white text-[9px] px-2 py-1 rounded opacity-0 group-active/copy:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
+                            Copied!
+                        </span>
+                    </button>
                 </div>
 
                 {/* NEW AUDIO PLAYER WITH TIMELINE */}

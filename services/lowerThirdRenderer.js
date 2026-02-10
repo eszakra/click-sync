@@ -358,19 +358,37 @@ class LowerThirdRenderer {
     findBinariesDirectory() {
         const isProduction = __dirname.includes('app.asar');
 
+        // Determine platform-specific compositor package name
+        let compositorPkgs = [];
+        if (process.platform === 'win32') {
+            compositorPkgs = ['compositor-win32-x64-msvc'];
+        } else if (process.platform === 'darwin') {
+            // Try both arm64 (Apple Silicon) and x64 (Intel)
+            if (process.arch === 'arm64') {
+                compositorPkgs = ['compositor-darwin-arm64', 'compositor-darwin-x64'];
+            } else {
+                compositorPkgs = ['compositor-darwin-x64', 'compositor-darwin-arm64'];
+            }
+        } else {
+            compositorPkgs = ['compositor-linux-x64-gnu'];
+        }
+        const binaryName = process.platform === 'win32' ? 'remotion.exe' : 'remotion';
+
         const possiblePaths = [];
 
-        if (isProduction && process.resourcesPath) {
-            // Production - use resourcesPath
-            possiblePaths.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@remotion', 'compositor-win32-x64-msvc'));
-        }
+        for (const pkg of compositorPkgs) {
+            if (isProduction && process.resourcesPath) {
+                // Production - use resourcesPath
+                possiblePaths.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@remotion', pkg));
+            }
 
-        // Development path
-        possiblePaths.push(path.join(__dirname, '..', 'node_modules', '@remotion', 'compositor-win32-x64-msvc'));
+            // Development path
+            possiblePaths.push(path.join(__dirname, '..', 'node_modules', '@remotion', pkg));
+        }
 
         for (const p of possiblePaths) {
             logInfo(`[LowerThird] Checking binaries at: ${p}`);
-            const exePath = path.join(p, 'remotion.exe');
+            const exePath = path.join(p, binaryName);
             if (fs.existsSync(exePath)) {
                 logInfo(`[LowerThird] ✓ Found binaries at: ${p}`);
                 return p;

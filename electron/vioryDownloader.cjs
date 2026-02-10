@@ -8,6 +8,11 @@ const fs = require('fs');
 const { app } = require('electron');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
+// Platform-appropriate User-Agent for Playwright browsers
+const VIORY_USER_AGENT = process.platform === 'darwin'
+    ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
 class VioryDownloader {
     constructor() {
         this.browser = null;
@@ -20,6 +25,15 @@ class VioryDownloader {
         // Videos cannot repeat within REPEAT_WINDOW segments
         this.recentlyUsedVideos = [];
         this.REPEAT_WINDOW = 6; // Videos can repeat after 6 segments
+
+        // Search results cache: avoids re-scraping the same query within TTL
+        // Key: query string, Value: { results: [...], timestamp: Date.now() }
+        this.searchCache = new Map();
+        this.SEARCH_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+        // Blacklist of videos that require "preparing" (My Content processing)
+        // These are skipped immediately in future searches within the same session
+        this.preparingBlacklist = new Set();
     }
 
     /**
@@ -50,14 +64,30 @@ class VioryDownloader {
         this.isHeadless = options.headless !== undefined ? options.headless : false;
         console.log(`[VioryDownloader] Initializing browser (headless: ${this.isHeadless})...`);
 
-        // Get chromium path for packaged app
+        // Get chromium path for packaged app (cross-platform)
         let executablePath = undefined;
         try {
             const appPath = path.dirname(process.execPath);
-            const chromiumPath = path.join(appPath, 'resources', 'playwright-browsers', 'chromium', 'chrome-win64', 'chrome.exe');
-            if (fs.existsSync(chromiumPath)) {
+            const resourceBase = path.join(appPath, 'resources', 'playwright-browsers', 'chromium');
+            
+            let chromiumPath;
+            if (process.platform === 'win32') {
+                chromiumPath = path.join(resourceBase, 'chrome-win64', 'chrome.exe');
+            } else if (process.platform === 'darwin') {
+                // Try multiple macOS path patterns
+                const macPaths = [
+                    path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                ];
+                chromiumPath = macPaths.find(p => fs.existsSync(p));
+            } else {
+                chromiumPath = path.join(resourceBase, 'chrome-linux', 'chrome');
+            }
+            
+            if (chromiumPath && fs.existsSync(chromiumPath)) {
                 executablePath = chromiumPath;
-                console.log('[VioryDownloader] Using bundled Chromium');
+                console.log('[VioryDownloader] Using bundled Chromium:', chromiumPath);
             }
         } catch (e) { /* Use system chromium */ }
 
@@ -90,7 +120,7 @@ class VioryDownloader {
         this.context = await this.browser.newContext({
             viewport: { width: 1400, height: 900 },
             acceptDownloads: true,
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            userAgent: VIORY_USER_AGENT
         });
 
         // Load saved cookies
@@ -757,12 +787,27 @@ class VioryDownloader {
         let tempPage = null;
 
         try {
-            // Get chromium path
+            // Get chromium path (cross-platform)
             let executablePath = undefined;
             try {
                 const appPath = path.dirname(process.execPath);
-                const chromiumPath = path.join(appPath, 'resources', 'playwright-browsers', 'chromium', 'chrome-win64', 'chrome.exe');
-                if (fs.existsSync(chromiumPath)) {
+                const resourceBase = path.join(appPath, 'resources', 'playwright-browsers', 'chromium');
+                
+                let chromiumPath;
+                if (process.platform === 'win32') {
+                    chromiumPath = path.join(resourceBase, 'chrome-win64', 'chrome.exe');
+                } else if (process.platform === 'darwin') {
+                    const macPaths = [
+                        path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                        path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                        path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                    ];
+                    chromiumPath = macPaths.find(p => fs.existsSync(p));
+                } else {
+                    chromiumPath = path.join(resourceBase, 'chrome-linux', 'chrome');
+                }
+                
+                if (chromiumPath && fs.existsSync(chromiumPath)) {
                     executablePath = chromiumPath;
                 }
             } catch (e) { /* Use system chromium */ }
@@ -777,7 +822,7 @@ class VioryDownloader {
 
             tempContext = await tempBrowser.newContext({
                 viewport: { width: 1400, height: 900 },
-                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                userAgent: VIORY_USER_AGENT
             });
 
             // Load saved cookies
@@ -1221,6 +1266,14 @@ Answer with JSON only:
 
             // Helper function to search with a single query on a given page
             const searchWithQuery = async (query, pageInstance, queryIndex) => {
+                // Check cache first (avoids re-scraping the same query)
+                const cacheKey = query.toLowerCase().trim();
+                const cached = this.searchCache.get(cacheKey);
+                if (cached && (Date.now() - cached.timestamp) < this.SEARCH_CACHE_TTL) {
+                    console.log(`      [CACHE HIT] "${query.substring(0, 30)}..." - ${cached.results.length} cached results`);
+                    return { query, queryIndex, results: cached.results, error: null };
+                }
+
                 try {
                     const searchUrl = `https://www.viory.video/en/videos?search=${encodeURIComponent(query)}`;
                     await pageInstance.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
@@ -1232,6 +1285,12 @@ Answer with JSON only:
                     }
 
                     await pageInstance.waitForTimeout(300);
+
+                    // Scroll down to trigger lazy-loading of additional results
+                    for (let scrolli = 0; scrolli < 3; scrolli++) {
+                        await pageInstance.evaluate(() => window.scrollBy(0, 600));
+                        await pageInstance.waitForTimeout(250);
+                    }
 
                     // Get results with titles AND thumbnail URLs
                     const searchResults = await pageInstance.evaluate(() => {
@@ -1270,8 +1329,13 @@ Answer with JSON only:
                             }
                         });
 
-                        return videos.slice(0, 12); // Get more results for thumbnail filtering
+                        return videos.slice(0, 20); // Get more results for thumbnail filtering (increased with scroll)
                     });
+
+                    // Cache the results for future queries
+                    if (searchResults.length > 0) {
+                        this.searchCache.set(cacheKey, { results: searchResults, timestamp: Date.now() });
+                    }
 
                     return { query, queryIndex, results: searchResults, error: null };
                 } catch (error) {
@@ -1387,47 +1451,41 @@ Answer with JSON only:
                 
                 if (expansionQueries.length > 0) {
                     console.log(`   Trying ${expansionQueries.length} expanded queries...`);
-                    
-                    // Search with expanded queries (use fewer parallel pages to be gentle)
-                    const expansionBatchSize = 3;
-                    const expansionBatches = [];
-                    for (let i = 0; i < expansionQueries.length; i += expansionBatchSize) {
-                        expansionBatches.push(expansionQueries.slice(i, i + expansionBatchSize));
-                    }
 
-                    for (let batchNum = 0; batchNum < expansionBatches.length; batchNum++) {
-                        const batchQueries = expansionBatches[batchNum];
-                        const batchPromises = batchQueries.map((query, idx) =>
-                            this.searchWithPage(searchPages[0], query, 10)
-                                .then(searchResults => ({ query, queryIndex: idx + 100, results: searchResults }))
-                                .catch(error => ({ query, queryIndex: idx + 100, results: [], error: error.message }))
-                        );
+                    // Run expansion queries sequentially on the main page
+                    // (extra search pages were already closed, only searchPages[0] remains)
+                    for (let i = 0; i < expansionQueries.length; i++) {
+                        const query = expansionQueries[i];
+                        const queryIndex = i + 100;
 
-                        const batchResults = await Promise.all(batchPromises);
+                        const result = await searchWithQuery(query, searchPages[0], queryIndex);
+                        const { results: searchResults, error } = result;
 
-                        for (const result of batchResults) {
-                            const { query, queryIndex, results: searchResults, error } = result;
+                        if (!error && searchResults && searchResults.length > 0) {
+                            console.log(`      [EXPAND] ✓ "${query.substring(0, 30)}..." - ${searchResults.length} videos`);
 
-                            if (!error && searchResults && searchResults.length > 0) {
-                                console.log(`      [EXPAND] ✓ "${query.substring(0, 30)}..." - ${searchResults.length} videos`);
-
-                                for (const video of searchResults) {
-                                    if (!seenUrls.has(video.url)) {
-                                        seenUrls.add(video.url);
-                                        allVideos.push({
-                                            ...video,
-                                            sourceQuery: query,
-                                            queryPriority: queryIndex
-                                        });
-                                    }
+                            for (const video of searchResults) {
+                                if (!seenUrls.has(video.url)) {
+                                    seenUrls.add(video.url);
+                                    allVideos.push({
+                                        ...video,
+                                        sourceQuery: query,
+                                        queryPriority: queryIndex
+                                    });
                                 }
-                            } else {
-                                console.log(`      [EXPAND] ✗ "${query.substring(0, 30)}..." - ${error || 'No results'}`);
                             }
+                        } else {
+                            console.log(`      [EXPAND] ✗ "${query.substring(0, 30)}..." - ${error || 'No results'}`);
                         }
 
-                        // Small delay between expansion batches
-                        if (batchNum + 1 < expansionBatches.length) {
+                        // Stop early if we found enough videos
+                        if (allVideos.length >= 12) {
+                            console.log(`      [EXPAND] Found ${allVideos.length} videos, stopping expansion early`);
+                            break;
+                        }
+
+                        // Small delay between queries
+                        if (i + 1 < expansionQueries.length) {
                             await new Promise(r => setTimeout(r, 300));
                         }
                     }
@@ -3227,6 +3285,22 @@ RESPOND WITH JSON ONLY:
             }
         }
 
+        // Filter out videos known to require "preparing" (My Content) from previous attempts
+        if (this.preparingBlacklist.size > 0) {
+            const beforeBlacklist = availableVideos.length;
+            availableVideos = availableVideos.filter(v => !this.preparingBlacklist.has(v.url));
+            const blacklisted = beforeBlacklist - availableVideos.length;
+            if (blacklisted > 0) {
+                console.log(`[Blacklist] Filtered out ${blacklisted} videos known to require My Content processing`);
+            }
+            // If all filtered, fall back to original (same safety pattern as excludeUrls)
+            if (availableVideos.length === 0) {
+                console.log(`[Blacklist] Warning: All candidates blacklisted. Using original list.`);
+                availableVideos = searchResults.videos.filter(v => !excludeUrls.has(v.url));
+                if (availableVideos.length === 0) availableVideos = searchResults.videos;
+            }
+        }
+
         const candidatesToTry = availableVideos.slice(0, maxCandidatesToTry);
         const skippedVideos = [];
         let firstVideoTriedMyContent = false;
@@ -3275,6 +3349,7 @@ RESPOND WITH JSON ONLY:
                 // If needs My Content, skip it and try alternatives (Optimization: don't wait for "preparing video")
                 if (firstResult.needsMyContent) {
                     console.log(`\n[VioryDownloader] Best video requires My Content - SKIPPING to alternatives (Optimization)`);
+                    this.preparingBlacklist.add(bestVideo.url);
                     skippedVideos.push({
                         url: bestVideo.url,
                         title: bestVideo.title,
@@ -3339,6 +3414,7 @@ RESPOND WITH JSON ONLY:
 
                 if (downloadResult.needsMyContent) {
                     console.log(`   ⏭️ Skipped - requires My Content`);
+                    this.preparingBlacklist.add(video.url);
                     skippedVideos.push({
                         url: video.url,
                         title: video.title,

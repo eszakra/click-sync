@@ -1,0 +1,126 @@
+name: Build macOS
+
+on:
+  # Manual trigger from GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Architecture to build'
+        required: true
+        default: 'arm64'
+        type: choice
+        options:
+          - arm64
+          - x64
+          - both
+  # Also build on release tags
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    
+    strategy:
+      matrix:
+        # Build selected arch, or both on tag push
+        arch: ${{ github.event.inputs.arch == 'both' && fromJSON('["arm64", "x64"]') || github.event.inputs.arch && fromJSON(format('["{0}"]', github.event.inputs.arch)) || fromJSON('["arm64", "x64"]') }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium (for macOS)
+        run: npx playwright install chromium
+
+      - name: Copy Playwright browsers to project
+        run: |
+          # Create target directory
+          mkdir -p playwright-browsers/chromium
+          
+          # Use the known Playwright cache location on macOS
+          PLAYWRIGHT_CACHE="$HOME/Library/Caches/ms-playwright"
+          
+          echo "Playwright cache: $PLAYWRIGHT_CACHE"
+          ls -la "$PLAYWRIGHT_CACHE" || true
+          
+          # Copy Chromium for macOS
+          if [ -d "$PLAYWRIGHT_CACHE" ]; then
+            # Find the chromium directory
+            CHROMIUM_DIR=$(find "$PLAYWRIGHT_CACHE" -maxdepth 1 -name "chromium-*" -type d | head -1)
+            if [ -n "$CHROMIUM_DIR" ]; then
+              echo "Found Chromium at: $CHROMIUM_DIR"
+              cp -R "$CHROMIUM_DIR"/* playwright-browsers/chromium/
+              echo "Chromium copied successfully"
+              ls -la playwright-browsers/chromium/
+              
+              # Show the actual Chromium app location
+              find playwright-browsers/chromium -name "Chromium.app" -o -name "chrome" -type f 2>/dev/null | head -5
+            else
+              echo "ERROR: Chromium directory not found in Playwright cache"
+              ls -la "$PLAYWRIGHT_CACHE" || true
+              exit 1
+            fi
+          else
+            echo "ERROR: Playwright cache not found at $PLAYWRIGHT_CACHE"
+            exit 1
+          fi
+
+      - name: Create uploads directory
+        run: mkdir -p uploads
+
+      - name: Bundle Remotion
+        run: npm run remotion:bundle
+
+      - name: Build Vite app
+        run: npm run build
+
+      - name: Build Electron for macOS (${{ matrix.arch }})
+        run: |
+          npx electron-builder --mac --${{ matrix.arch }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Skip code signing - app will show "unidentified developer" warning
+          # Users bypass with: right-click > Open, or xattr -cr /Applications/ClickSync.app
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          CSC_LINK: ""
+          CSC_KEY_PASSWORD: ""
+
+      - name: List build output
+        run: |
+          echo "=== Release directory ==="
+          ls -la release/ || echo "No release directory"
+          echo ""
+          echo "=== DMG/ZIP files ==="
+          find release/ -name "*.dmg" -o -name "*.zip" -o -name "*.blockmap" | head -20 || echo "No build files found"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClickSync-macOS-${{ matrix.arch }}
+          path: |
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      # If triggered by a tag, also upload to the GitHub Release
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.dmg
+            release/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

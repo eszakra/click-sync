@@ -6,6 +6,11 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Platform-appropriate User-Agent
+const VIORY_USER_AGENT = process.platform === 'darwin'
+    ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
 // Detect if running in packaged Electron app
 function getChromiumExecutablePath() {
     try {
@@ -17,9 +22,24 @@ function getChromiumExecutablePath() {
             process.mainModule.filename.includes('app.asar');
 
         if (isPackaged || (process.env.NODE_ENV === 'production' && process.versions.electron)) {
-            // In packaged app, use bundled Chromium from resources folder
+            // In packaged app, use bundled Chromium from resources folder (cross-platform)
             const appPath = path.dirname(process.execPath);
-            const chromiumPath = path.join(appPath, 'resources', 'playwright-browsers', 'chromium', 'chrome-win64', 'chrome.exe');
+            const resourceBase = path.join(appPath, 'resources', 'playwright-browsers', 'chromium');
+            
+            let chromiumPath;
+            if (process.platform === 'win32') {
+                chromiumPath = path.join(resourceBase, 'chrome-win64', 'chrome.exe');
+            } else if (process.platform === 'darwin') {
+                const macPaths = [
+                    path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                ];
+                chromiumPath = macPaths.find(p => fs.existsSync(p)) || macPaths[0];
+            } else {
+                chromiumPath = path.join(resourceBase, 'chrome-linux', 'chrome');
+            }
+            
             console.log('[VioryScraper] Using bundled Chromium:', chromiumPath);
             return chromiumPath;
         }
@@ -61,7 +81,7 @@ class VioryScraper {
 
                 this.browser = await chromium.launch(launchOptions);
                 this.context = await this.browser.newContext({
-                    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    userAgent: VIORY_USER_AGENT
                 });
             })();
         }

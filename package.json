@@ -16,8 +16,10 @@
     "remotion:bundle": "npx remotion bundle remotion/index.ts --out-dir remotion-bundle",
     "electron:dev": "concurrently \"npm run dev\" \"npm run server\" \"wait-on tcp:3000 && electron .\"",
     "electron:build": "npm run clean && npm run remotion:bundle && npm run build && electron-builder --win",
+    "electron:build:mac": "npm run clean && npm run remotion:bundle && npm run build && electron-builder --mac",
     "electron:pack": "npm run remotion:bundle && npm run build && electron-builder --dir",
-    "electron:publish": "npm run clean && npm run remotion:bundle && npm run build && electron-builder --win --publish always"
+    "electron:publish": "npm run clean && npm run remotion:bundle && npm run build && electron-builder --win --publish always",
+    "electron:publish:mac": "npm run clean && npm run remotion:bundle && npm run build && electron-builder --mac --publish always"
   },
   "dependencies": {
     "@google/genai": "^1.34.0",
@@ -88,7 +90,9 @@
       "node_modules/ffmpeg-static/**/*",
       "node_modules/ffprobe-static/**/*",
       "node_modules/playwright-core/**/*",
-      "node_modules/@remotion/compositor-win32-x64-msvc/**/*"
+      "node_modules/@remotion/compositor-win32-x64-msvc/**/*",
+      "node_modules/@remotion/compositor-darwin-x64/**/*",
+      "node_modules/@remotion/compositor-darwin-arm64/**/*"
     ],
     "extraResources": [
       {
@@ -142,6 +146,35 @@
       "createStartMenuShortcut": true,
       "shortcutName": "ClickSync",
       "runAfterFinish": true
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "public/logo.png",
+      "category": "public.app-category.video",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "publish": [
       {

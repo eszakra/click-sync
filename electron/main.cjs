@@ -8,6 +8,11 @@ const log = require('electron-log');
 const { VioryDownloader } = require('./vioryDownloader.cjs');
 const JSZip = require('jszip');
 
+// Platform-appropriate User-Agent for Playwright browsers
+const VIORY_USER_AGENT = process.platform === 'darwin'
+    ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
 // Global Viory downloader instance
 let vioryDownloader = null;
 let viorySessionStatus = { checked: false, valid: false, needsLogin: true };
@@ -609,9 +614,10 @@ function createWindow() {
             contextIsolation: true,
             preload: path.join(__dirname, 'preload.cjs')
         },
-        // Modern frameless look
-        frame: false,
-        titleBarStyle: 'hidden',
+        // Modern frameless look - on macOS keep frame for traffic light buttons
+        frame: process.platform === 'darwin' ? true : false,
+        titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+        trafficLightPosition: process.platform === 'darwin' ? { x: 15, y: 15 } : undefined,
         backgroundColor: '#000000',
         show: false, // Don't show until ready
         icon: path.join(__dirname, '../public/logo.png')
@@ -642,10 +648,20 @@ function createWindow() {
 
             // Show notification on first minimize
             if (tray && !mainWindow.trayNotificationShown) {
-                tray.displayBalloon({
-                    title: 'ClickSync',
-                    content: 'App is running in the background. Click the tray icon to restore.'
-                });
+                if (process.platform === 'win32') {
+                    // displayBalloon is Windows-only
+                    tray.displayBalloon({
+                        title: 'ClickSync',
+                        content: 'App is running in the background. Click the tray icon to restore.'
+                    });
+                } else {
+                    // Use Notification API on macOS/Linux
+                    new Notification({
+                        title: 'ClickSync',
+                        body: 'App is running in the background. Click the tray icon to restore.',
+                        silent: true
+                    }).show();
+                }
                 mainWindow.trayNotificationShown = true;
             }
         }
@@ -692,8 +708,9 @@ async function startServer() {
             console.error('[Electron] Stack:', e.stack);
 
             // Show error dialog to user
+            const serverPort = process.platform === 'darwin' ? 5050 : 5000;
             dialog.showErrorBox('Error al Iniciar Servidor',
-                `${errMsg}\n\nPosibles causas:\n1. Chromium/Playwright no instalado\n2. Firewall bloqueando puerto 5000\n3. Puerto 5000 ocupado por otra app\n\nDetalles técnicos:\n${e.stack ? e.stack.substring(0, 500) : 'N/A'}`);
+                `${errMsg}\n\nPosibles causas:\n1. Chromium/Playwright no instalado\n2. Firewall bloqueando puerto ${serverPort}\n3. Puerto ${serverPort} ocupado por otra app\n\nDetalles técnicos:\n${e.stack ? e.stack.substring(0, 500) : 'N/A'}`);
         }
     }
 }
@@ -709,7 +726,8 @@ function startServerHealthCheck() {
     serverHealthCheckInterval = setInterval(async () => {
         try {
             const http = require('http');
-            const req = http.get('http://localhost:5000/', { timeout: 5000 }, (res) => {
+            const healthPort = process.platform === 'darwin' ? 5050 : 5000;
+            const req = http.get(`http://localhost:${healthPort}/`, { timeout: 5000 }, (res) => {
                 // Server is responding, all good
                 if (res.statusCode !== 200 && res.statusCode !== 404) {
                     console.log(`[Server Health] Unexpected status: ${res.statusCode}`);
@@ -773,10 +791,28 @@ async function checkVioryLoginAtStartup() {
         let executablePath = undefined;
         try {
             const appPath = path.dirname(process.execPath);
-            const chromiumPath = path.join(appPath, 'resources', 'playwright-browsers', 'chromium', 'chrome-win64', 'chrome.exe');
+            const resourceBase = path.join(appPath, 'resources', 'playwright-browsers', 'chromium');
+            
+            // Platform-specific Chromium paths
+            let chromiumPath;
+            if (process.platform === 'win32') {
+                chromiumPath = path.join(resourceBase, 'chrome-win64', 'chrome.exe');
+            } else if (process.platform === 'darwin') {
+                chromiumPath = path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
+                // Alternative path structure
+                if (!fs.existsSync(chromiumPath)) {
+                    chromiumPath = path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
+                }
+                if (!fs.existsSync(chromiumPath)) {
+                    chromiumPath = path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
+                }
+            } else {
+                chromiumPath = path.join(resourceBase, 'chrome-linux', 'chrome');
+            }
+            
             if (fs.existsSync(chromiumPath)) {
                 executablePath = chromiumPath;
-                console.log('[VioryLogin] Using bundled Chromium');
+                console.log('[VioryLogin] Using bundled Chromium:', chromiumPath);
             }
         } catch (e) { /* Use system chromium */ }
 
@@ -791,7 +827,7 @@ async function checkVioryLoginAtStartup() {
 
         vioryLoginContext = await vioryLoginBrowser.newContext({
             viewport: { width: 1280, height: 900 },
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            userAgent: VIORY_USER_AGENT
         });
 
         vioryLoginPage = await vioryLoginContext.newPage();
@@ -1564,32 +1600,6 @@ ipcMain.on('update-tray-progress', (event, data) => {
     }
 });
 
-// Tray Progress Update IPC
-ipcMain.on('update-tray-progress', (event, data) => {
-    if (tray) {
-        const { status, progress, message, activeProjects } = data;
-
-        let tooltip = 'ClickSync';
-
-        if (status === 'processing') {
-            tooltip = `ClickSync - Processing: ${Math.round(progress)}%`;
-            if (message) {
-                tooltip += `\n${message}`;
-            }
-        } else if (status === 'idle') {
-            tooltip = 'ClickSync - Ready';
-        } else if (status === 'completed') {
-            tooltip = 'ClickSync - Completed!';
-        }
-
-        // Add active projects count if provided
-        if (activeProjects && activeProjects > 0) {
-            tooltip += `\n${activeProjects} active project(s)`;
-        }
-
-        tray.setToolTip(tooltip);
-    }
-});
 // --- SMART EDITOR IPC HANDLERS ---
 // Using dynamic imports because services are ESM
 let videoEditorService = null;

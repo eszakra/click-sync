@@ -39,6 +39,7 @@ function getHardwareEncoder() {
         // Check for NVIDIA
         const result = execSync('ffmpeg -encoders 2>&1', { encoding: 'utf8' });
         if (result.includes('h264_nvenc')) return 'h264_nvenc';
+        if (result.includes('h264_videotoolbox')) return 'h264_videotoolbox';
         if (result.includes('h264_qsv')) return 'h264_qsv';
         if (result.includes('h264_amf')) return 'h264_amf';
     } catch (e) {}

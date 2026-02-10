@@ -85,7 +85,7 @@ ${separator}
 ${separator}`;
 
         try {
-            fs.appendFileSync(EXPORT_LOG_PATH, header);
+            fs.appendFileSync(EXPORT_LOG, header);
         } catch (e) { }
 
         this.info('SESSION', 'Export session started');
@@ -126,7 +126,7 @@ ${separator}`;
         const logLine = `[${new Date().toISOString()}] [${elapsed.padStart(8)}] [${category.padEnd(12)}] ${msg}\n`;
         console.log(`[EXPORT/${category}] ${msg}`);
         try {
-            fs.appendFileSync(EXPORT_LOG_PATH, logLine);
+            fs.appendFileSync(EXPORT_LOG, logLine);
         } catch (e) { }
     },
 
@@ -140,7 +140,7 @@ ${separator}`;
         this.info(category, `❌ ERROR: ${msg}`);
         if (error?.stack) {
             try {
-                fs.appendFileSync(EXPORT_LOG_PATH, `    Stack: ${error.stack}\n`);
+                fs.appendFileSync(EXPORT_LOG, `    Stack: ${error.stack}\n`);
             } catch (e) { }
         }
     },
@@ -149,7 +149,7 @@ ${separator}`;
     logFFmpegCommand(command) {
         const separator = '-'.repeat(80);
         try {
-            fs.appendFileSync(EXPORT_LOG_PATH, `\n${separator}\nFFMPEG COMMAND:\n${separator}\n${command}\n${separator}\n\n`);
+            fs.appendFileSync(EXPORT_LOG, `\n${separator}\nFFMPEG COMMAND:\n${separator}\n${command}\n${separator}\n\n`);
         } catch (e) { }
         this.info('FFMPEG', `Command logged (${command.length} chars)`);
     },
@@ -213,7 +213,7 @@ ${separator}`;
         summary += `${'═'.repeat(100)}\n\n`;
 
         try {
-            fs.appendFileSync(EXPORT_LOG_PATH, summary);
+            fs.appendFileSync(EXPORT_LOG, summary);
         } catch (e) { }
 
         this.info('SESSION', success ? 'Export completed successfully' : 'Export failed');
@@ -507,9 +507,12 @@ class VideoEditorEngine {
                 const hasNvenc = this.availableEncoders.has('h264_nvenc');
                 const hasQsv = this.availableEncoders.has('h264_qsv');
                 const hasAmf = this.availableEncoders.has('h264_amf');
+                const hasVideoToolbox = this.availableEncoders.has('h264_videotoolbox');
 
                 if (hasNvenc) {
                     this.detectedGPU = { type: 'NVIDIA', encoder: 'h264_nvenc', name: 'NVIDIA NVENC' };
+                } else if (hasVideoToolbox) {
+                    this.detectedGPU = { type: 'Apple', encoder: 'h264_videotoolbox', name: 'Apple VideoToolbox' };
                 } else if (hasQsv) {
                     this.detectedGPU = { type: 'Intel', encoder: 'h264_qsv', name: 'Intel Quick Sync' };
                 } else if (hasAmf) {
@@ -529,6 +532,7 @@ class VideoEditorEngine {
                 editorLog(`[GPU] H.264 Encoder: ${this.getBestEncoder('h264')}`);
                 editorLog(`[GPU] H.265 Encoder: ${this.getBestEncoder('h265')}`);
                 editorLog(`[GPU] NVENC: ${hasNvenc ? '✓ Available' : '✗ Not found'}`);
+                editorLog(`[GPU] VideoToolbox: ${hasVideoToolbox ? '✓ Available' : '✗ Not found'}`);
                 editorLog(`[GPU] Quick Sync: ${hasQsv ? '✓ Available' : '✗ Not found'}`);
                 editorLog(`[GPU] AMF: ${hasAmf ? '✓ Available' : '✗ Not found'}`);
                 editorLog(`[GPU] ═══════════════════════════════════════════════════════`);
@@ -577,8 +581,9 @@ class VideoEditorEngine {
         const base = codecBase === 'h264' ? 'h264' : 'hevc';
         const libFallback = codecBase === 'h264' ? 'libx264' : 'libx265';
 
-        // Priority: NVIDIA > Intel QSV > AMD AMF > CPU
+        // Priority: NVIDIA > Apple VideoToolbox > Intel QSV > AMD AMF > CPU
         if (this.availableEncoders.has(`${base}_nvenc`)) return `${base}_nvenc`;
+        if (this.availableEncoders.has(`${base}_videotoolbox`)) return `${base}_videotoolbox`;
         if (this.availableEncoders.has(`${base}_qsv`)) return `${base}_qsv`;
         if (this.availableEncoders.has(`${base}_amf`)) return `${base}_amf`;
 

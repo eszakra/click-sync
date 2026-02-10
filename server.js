@@ -14,7 +14,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = process.env.PORT || 5000;
+// Port 5000 conflicts with AirPlay Receiver on macOS Ventura+, use 5050 on macOS
+const port = process.env.PORT || (process.platform === 'darwin' ? 5050 : 5000);
 
 // Setup basic middleware
 app.use(cors());
