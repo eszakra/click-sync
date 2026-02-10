@@ -158,6 +158,7 @@
         }
       ],
       "icon": "public/logo.png",
+      "identity": null,
       "category": "public.app-category.video",
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
