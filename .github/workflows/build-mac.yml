@@ -11,8 +11,6 @@ on:
         type: choice
         options:
           - arm64
-          - x64
-          - both
   # Also build on release tags
   push:
     tags:
@@ -24,8 +22,7 @@ jobs:
     
     strategy:
       matrix:
-        # Build selected arch, or both on tag push
-        arch: ${{ github.event.inputs.arch == 'both' && fromJSON('["arm64", "x64"]') || github.event.inputs.arch && fromJSON(format('["{0}"]', github.event.inputs.arch)) || fromJSON('["arm64", "x64"]') }}
+        arch: ${{ github.event.inputs.arch && fromJSON(format('["{0}"]', github.event.inputs.arch)) || fromJSON('["arm64"]') }}
 
     steps:
       - name: Checkout code
