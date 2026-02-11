@@ -1,16 +1,8 @@
-name: Build macOS
+name: Build macOS (Apple Silicon)
 
 on:
   # Manual trigger from GitHub Actions tab
   workflow_dispatch:
-    inputs:
-      arch:
-        description: 'Architecture to build'
-        required: true
-        default: 'arm64'
-        type: choice
-        options:
-          - arm64
   # Also build on release tags
   push:
     tags:
@@ -18,13 +10,22 @@ on:
 
 jobs:
   build-mac:
-    runs-on: macos-latest
-    
-    strategy:
-      matrix:
-        arch: ${{ github.event.inputs.arch && fromJSON(format('["{0}"]', github.event.inputs.arch)) || fromJSON('["arm64"]') }}
+    # macos-14 = Apple Silicon (M1/M2/M3/M4) native ARM64 runner
+    # This ensures native arm64 binaries without Rosetta translation
+    runs-on: macos-14
 
     steps:
+      - name: Verify Apple Silicon runner
+        run: |
+          echo "Architecture: $(uname -m)"
+          echo "macOS version: $(sw_vers -productVersion)"
+          echo "Chip: $(sysctl -n machdep.cpu.brand_string)"
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "ERROR: Not running on Apple Silicon!"
+            exit 1
+          fi
+          echo "Confirmed: Running on Apple Silicon (ARM64)"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -37,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright Chromium (for macOS)
+      - name: Install Playwright Chromium (ARM64)
         run: npx playwright install chromium
 
       - name: Copy Playwright browsers to project
@@ -120,9 +121,9 @@ jobs:
       - name: Build Vite app
         run: npm run build
 
-      - name: Build Electron for macOS (${{ matrix.arch }})
+      - name: Build Electron for macOS (ARM64 - Apple Silicon)
         run: |
-          npx electron-builder --mac --${{ matrix.arch }}
+          npx electron-builder --mac --arm64
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Skip Apple code signing - afterSign.cjs hook will apply ad-hoc signing
@@ -139,7 +140,7 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ClickSync-macOS-${{ matrix.arch }}
+          name: ClickSync-macOS-arm64
           path: |
             release/*.dmg
             release/*.zip
