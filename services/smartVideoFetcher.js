@@ -444,14 +444,79 @@ class SmartVideoFetcher {
     }
 
     /**
+     * Get Chromium executable path (cross-platform, handles bundled + cache)
+     */
+    _getChromiumExecutablePath() {
+        // Try bundled Chromium in packaged app
+        try {
+            const appPath = path.dirname(process.execPath);
+            const resourceBase = path.join(appPath, 'resources', 'playwright-browsers', 'chromium');
+            
+            let chromiumPath;
+            if (process.platform === 'win32') {
+                chromiumPath = path.join(resourceBase, 'chrome-win64', 'chrome.exe');
+            } else if (process.platform === 'darwin') {
+                const macPaths = [
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                ];
+                chromiumPath = macPaths.find(p => fs.existsSync(p));
+            } else {
+                chromiumPath = path.join(resourceBase, 'chrome-linux', 'chrome');
+            }
+            
+            if (chromiumPath && fs.existsSync(chromiumPath)) {
+                console.log('[SmartFetcher] Using bundled Chromium:', chromiumPath);
+                return chromiumPath;
+            }
+        } catch (e) { /* Not in packaged app */ }
+
+        // On macOS, try Playwright's default cache location
+        if (process.platform === 'darwin') {
+            try {
+                const homeDir = process.env.HOME || '';
+                const playwrightCache = path.join(homeDir, 'Library', 'Caches', 'ms-playwright');
+                if (fs.existsSync(playwrightCache)) {
+                    const chromiumDirs = fs.readdirSync(playwrightCache).filter(d => d.startsWith('chromium-')).sort().reverse();
+                    for (const dir of chromiumDirs) {
+                        const cachePaths = [
+                            path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                            path.join(playwrightCache, dir, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                            path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                            path.join(playwrightCache, dir, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                        ];
+                        const found = cachePaths.find(p => fs.existsSync(p));
+                        if (found) {
+                            console.log('[SmartFetcher] Using Playwright cache Chromium:', found);
+                            return found;
+                        }
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        return undefined;
+    }
+
+    /**
      * Initialize browser for session management
      */
     async initBrowser() {
-        this.browser = await chromium.launch({
+        const executablePath = this._getChromiumExecutablePath();
+        const launchOptions = {
             headless: true,
-            channel: 'chromium',
             args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
+        };
+        if (executablePath) {
+            launchOptions.executablePath = executablePath;
+        } else {
+            launchOptions.channel = 'chromium';
+        }
+        this.browser = await chromium.launch(launchOptions);
         this.context = await this.browser.newContext({
             viewport: { width: 1280, height: 720 }
         });

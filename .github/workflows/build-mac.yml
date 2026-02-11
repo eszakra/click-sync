@@ -48,21 +48,59 @@ jobs:
           # Use the known Playwright cache location on macOS
           PLAYWRIGHT_CACHE="$HOME/Library/Caches/ms-playwright"
           
+          echo "=== Playwright cache contents ==="
           echo "Playwright cache: $PLAYWRIGHT_CACHE"
           ls -la "$PLAYWRIGHT_CACHE" || true
           
           # Copy Chromium for macOS
           if [ -d "$PLAYWRIGHT_CACHE" ]; then
-            # Find the chromium directory
-            CHROMIUM_DIR=$(find "$PLAYWRIGHT_CACHE" -maxdepth 1 -name "chromium-*" -type d | head -1)
+            # Find the chromium directory (get the latest version)
+            CHROMIUM_DIR=$(find "$PLAYWRIGHT_CACHE" -maxdepth 1 -name "chromium-*" -type d | sort -V | tail -1)
             if [ -n "$CHROMIUM_DIR" ]; then
               echo "Found Chromium at: $CHROMIUM_DIR"
+              echo "=== Chromium directory contents ==="
+              ls -la "$CHROMIUM_DIR"
+              
+              # Copy all contents (handles both old "Chromium.app" and new "Google Chrome for Testing.app")
               cp -R "$CHROMIUM_DIR"/* playwright-browsers/chromium/
               echo "Chromium copied successfully"
+              
+              echo "=== Copied browser structure ==="
               ls -la playwright-browsers/chromium/
               
-              # Show the actual Chromium app location
-              find playwright-browsers/chromium -name "Chromium.app" -o -name "chrome" -type f 2>/dev/null | head -5
+              # Show the actual browser app location (handle both naming conventions)
+              echo "=== Browser executables found ==="
+              find playwright-browsers/chromium -name "Chromium.app" -o -name "Google Chrome for Testing.app" -o -name "chrome" -type f 2>/dev/null | head -10
+              
+              # Verify the executable exists
+              FOUND_EXEC=""
+              # Check new Playwright v1.57+ paths first (Google Chrome for Testing)
+              for ARCH_DIR in chrome-mac-arm64 chrome-mac-x64 chrome-mac; do
+                EXEC_PATH="playwright-browsers/chromium/$ARCH_DIR/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+                if [ -f "$EXEC_PATH" ]; then
+                  FOUND_EXEC="$EXEC_PATH"
+                  echo "Found Google Chrome for Testing executable: $EXEC_PATH"
+                  break
+                fi
+              done
+              
+              # Fall back to legacy Chromium paths
+              if [ -z "$FOUND_EXEC" ]; then
+                for ARCH_DIR in chrome-mac-arm64 chrome-mac-x64 chrome-mac; do
+                  EXEC_PATH="playwright-browsers/chromium/$ARCH_DIR/Chromium.app/Contents/MacOS/Chromium"
+                  if [ -f "$EXEC_PATH" ]; then
+                    FOUND_EXEC="$EXEC_PATH"
+                    echo "Found Chromium executable: $EXEC_PATH"
+                    break
+                  fi
+                done
+              fi
+              
+              if [ -z "$FOUND_EXEC" ]; then
+                echo "WARNING: No Chromium executable found! Listing full tree..."
+                find playwright-browsers/chromium -type f -name "*.app" -o -type f -perm +111 2>/dev/null | head -20
+                # Don't fail - the app has runtime fallback logic
+              fi
             else
               echo "ERROR: Chromium directory not found in Playwright cache"
               ls -la "$PLAYWRIGHT_CACHE" || true

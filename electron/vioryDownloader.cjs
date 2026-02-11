@@ -74,11 +74,16 @@ class VioryDownloader {
             if (process.platform === 'win32') {
                 chromiumPath = path.join(resourceBase, 'chrome-win64', 'chrome.exe');
             } else if (process.platform === 'darwin') {
-                // Try multiple macOS path patterns
+                // Try multiple macOS path patterns (Playwright v1.57+ uses "Google Chrome for Testing")
                 const macPaths = [
-                    path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    // New Playwright v1.57+ paths (Google Chrome for Testing)
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    // Legacy Playwright paths (Chromium)
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
                     path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
-                    path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                    path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
                 ];
                 chromiumPath = macPaths.find(p => fs.existsSync(p));
             } else {
@@ -88,33 +93,99 @@ class VioryDownloader {
             if (chromiumPath && fs.existsSync(chromiumPath)) {
                 executablePath = chromiumPath;
                 console.log('[VioryDownloader] Using bundled Chromium:', chromiumPath);
+            } else {
+                console.log('[VioryDownloader] Bundled Chromium not found, listing resource contents...');
+                try {
+                    if (fs.existsSync(resourceBase)) {
+                        const entries = fs.readdirSync(resourceBase, { recursive: true }).slice(0, 30);
+                        console.log('[VioryDownloader] Resource contents:', entries);
+                    }
+                } catch (listErr) { /* ignore */ }
             }
         } catch (e) { /* Use system chromium */ }
 
-        this.browser = await chromium.launch({
-            headless: this.isHeadless,
-            channel: executablePath ? undefined : 'chromium',
-            executablePath: executablePath,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--start-minimized',
-                // RAM optimization flags
-                '--disable-gpu',                          // Disable GPU (not needed for scraping)
-                '--disable-software-rasterizer',          // Reduce memory usage
-                '--disable-extensions',                   // No extensions needed
-                '--disable-background-networking',        // Reduce background activity
-                '--disable-default-apps',                 // No default apps
-                '--disable-sync',                         // No sync needed
-                '--disable-translate',                    // No translation needed
-                '--metrics-recording-only',               // Minimal metrics
-                '--mute-audio',                           // No audio needed
-                '--no-first-run',                         // Skip first run
-                '--safebrowsing-disable-auto-update',     // No safe browsing updates
-                '--js-flags=--max-old-space-size=2048'    // Limit JS heap to 2GB
-            ]
-        });
+        // On macOS in dev mode, also try Playwright's default cache location
+        if (!executablePath && process.platform === 'darwin') {
+            try {
+                const homeDir = process.env.HOME || '';
+                const playwrightCache = path.join(homeDir, 'Library', 'Caches', 'ms-playwright');
+                if (fs.existsSync(playwrightCache)) {
+                    const chromiumDirs = fs.readdirSync(playwrightCache).filter(d => d.startsWith('chromium-')).sort().reverse();
+                    for (const dir of chromiumDirs) {
+                        const cachePaths = [
+                            path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                            path.join(playwrightCache, dir, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                            path.join(playwrightCache, dir, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                            path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                            path.join(playwrightCache, dir, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                            path.join(playwrightCache, dir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                        ];
+                        const found = cachePaths.find(p => fs.existsSync(p));
+                        if (found) {
+                            executablePath = found;
+                            console.log('[VioryDownloader] Using Playwright cache Chromium:', found);
+                            break;
+                        }
+                    }
+                }
+            } catch (e) { console.log('[VioryDownloader] Cache search failed:', e.message); }
+        }
+
+        const launchArgs = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--start-minimized',
+            // RAM optimization flags
+            '--disable-gpu',                          // Disable GPU (not needed for scraping)
+            '--disable-software-rasterizer',          // Reduce memory usage
+            '--disable-extensions',                   // No extensions needed
+            '--disable-background-networking',        // Reduce background activity
+            '--disable-default-apps',                 // No default apps
+            '--disable-sync',                         // No sync needed
+            '--disable-translate',                    // No translation needed
+            '--metrics-recording-only',               // Minimal metrics
+            '--mute-audio',                           // No audio needed
+            '--no-first-run',                         // Skip first run
+            '--safebrowsing-disable-auto-update',     // No safe browsing updates
+            '--js-flags=--max-old-space-size=2048'    // Limit JS heap to 2GB
+        ];
+
+        try {
+            this.browser = await chromium.launch({
+                headless: this.isHeadless,
+                channel: executablePath ? undefined : 'chromium',
+                executablePath: executablePath,
+                args: launchArgs
+            });
+        } catch (launchError) {
+            // If Chromium executable not found, try auto-installing
+            if (launchError.message && launchError.message.includes('Executable doesn\'t exist')) {
+                console.log('[VioryDownloader] Chromium not found - attempting auto-install...');
+                try {
+                    const { execSync } = require('child_process');
+                    execSync('npx playwright install chromium', { 
+                        stdio: 'inherit',
+                        timeout: 120000 
+                    });
+                    console.log('[VioryDownloader] Playwright Chromium installed, retrying launch...');
+                    
+                    // After install, retry without executablePath (use Playwright's default)
+                    this.browser = await chromium.launch({
+                        headless: this.isHeadless,
+                        args: launchArgs
+                    });
+                } catch (installError) {
+                    console.error('[VioryDownloader] Auto-install failed:', installError.message);
+                    throw new Error(
+                        'Chromium browser not found. Please run: npx playwright install chromium\n' +
+                        'Original error: ' + launchError.message
+                    );
+                }
+            } else {
+                throw launchError;
+            }
+        }
         console.log('[VioryDownloader] Browser launched with RAM optimization flags');
 
         this.context = await this.browser.newContext({
@@ -797,10 +868,14 @@ class VioryDownloader {
                 if (process.platform === 'win32') {
                     chromiumPath = path.join(resourceBase, 'chrome-win64', 'chrome.exe');
                 } else if (process.platform === 'darwin') {
+                    // Try multiple macOS path patterns (Playwright v1.57+ uses "Google Chrome for Testing")
                     const macPaths = [
-                        path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                        path.join(resourceBase, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                        path.join(resourceBase, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                        path.join(resourceBase, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                        path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
                         path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
-                        path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                        path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
                     ];
                     chromiumPath = macPaths.find(p => fs.existsSync(p));
                 } else {
@@ -811,6 +886,30 @@ class VioryDownloader {
                     executablePath = chromiumPath;
                 }
             } catch (e) { /* Use system chromium */ }
+
+            // On macOS, also try Playwright's default cache location
+            if (!executablePath && process.platform === 'darwin') {
+                try {
+                    const homeDir = process.env.HOME || '';
+                    const playwrightCache = path.join(homeDir, 'Library', 'Caches', 'ms-playwright');
+                    if (fs.existsSync(playwrightCache)) {
+                        const chromiumDirs = fs.readdirSync(playwrightCache).filter(d => d.startsWith('chromium-')).sort().reverse();
+                        for (const dir of chromiumDirs) {
+                            const cachePaths = [
+                                path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                                path.join(playwrightCache, dir, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                                path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                                path.join(playwrightCache, dir, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                            ];
+                            const found = cachePaths.find(p => fs.existsSync(p));
+                            if (found) {
+                                executablePath = found;
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+            }
 
             // Create temporary headless browser
             tempBrowser = await chromium.launch({

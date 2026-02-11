@@ -1,5 +1,6 @@
 const { execSync } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
 /**
  * electron-builder afterSign hook
@@ -25,6 +26,42 @@ exports.default = async function (context) {
             execSync(`codesign --remove-signature "${appPath}"`, { stdio: 'inherit' });
         } catch (e) {
             // Ignore if no signature exists
+        }
+
+        // First, sign the bundled Chromium/Google Chrome for Testing app specifically
+        // (--deep sometimes misses nested .app bundles)
+        const resourcesPath = path.join(appPath, 'Contents', 'Resources');
+        const chromiumBase = path.join(resourcesPath, 'playwright-browsers', 'chromium');
+        
+        if (fs.existsSync(chromiumBase)) {
+            console.log('[afterSign] Signing bundled Chromium browser...');
+            
+            // Find any .app bundles within the chromium directory
+            const findApps = (dir) => {
+                const results = [];
+                try {
+                    const entries = fs.readdirSync(dir, { withFileTypes: true });
+                    for (const entry of entries) {
+                        const fullPath = path.join(dir, entry.name);
+                        if (entry.name.endsWith('.app')) {
+                            results.push(fullPath);
+                        } else if (entry.isDirectory()) {
+                            results.push(...findApps(fullPath));
+                        }
+                    }
+                } catch (e) { /* ignore permission errors */ }
+                return results;
+            };
+
+            const nestedApps = findApps(chromiumBase);
+            for (const nestedApp of nestedApps) {
+                console.log(`[afterSign] Signing nested app: ${nestedApp}`);
+                try {
+                    execSync(`codesign --force --deep --sign - "${nestedApp}"`, { stdio: 'inherit' });
+                } catch (e) {
+                    console.warn(`[afterSign] Warning: Failed to sign ${nestedApp}: ${e.message}`);
+                }
+            }
         }
 
         // Ad-hoc sign the entire app bundle including all nested frameworks and binaries

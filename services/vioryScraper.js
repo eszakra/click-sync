@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 // Get __dirname equivalent for ESM
@@ -30,22 +31,56 @@ function getChromiumExecutablePath() {
             if (process.platform === 'win32') {
                 chromiumPath = path.join(resourceBase, 'chrome-win64', 'chrome.exe');
             } else if (process.platform === 'darwin') {
+                // Try multiple macOS path patterns (Playwright v1.57+ uses "Google Chrome for Testing")
                 const macPaths = [
-                    path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
                     path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
-                    path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                    path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
                 ];
-                chromiumPath = macPaths.find(p => fs.existsSync(p)) || macPaths[0];
+                chromiumPath = macPaths.find(p => fs.existsSync(p));
             } else {
                 chromiumPath = path.join(resourceBase, 'chrome-linux', 'chrome');
             }
             
-            console.log('[VioryScraper] Using bundled Chromium:', chromiumPath);
-            return chromiumPath;
+            if (chromiumPath && fs.existsSync(chromiumPath)) {
+                console.log('[VioryScraper] Using bundled Chromium:', chromiumPath);
+                return chromiumPath;
+            }
+            console.log('[VioryScraper] Bundled Chromium not found in resources');
         }
     } catch (e) {
-        console.log('[VioryScraper] Not in packaged mode, using default Playwright browser');
+        console.log('[VioryScraper] Not in packaged mode, checking Playwright cache...');
     }
+
+    // On macOS, try Playwright's default cache location as fallback
+    if (process.platform === 'darwin') {
+        try {
+            const homeDir = process.env.HOME || '';
+            const playwrightCache = path.join(homeDir, 'Library', 'Caches', 'ms-playwright');
+            if (fs.existsSync(playwrightCache)) {
+                const chromiumDirs = fs.readdirSync(playwrightCache).filter(d => d.startsWith('chromium-')).sort().reverse();
+                for (const dir of chromiumDirs) {
+                    const cachePaths = [
+                        path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                        path.join(playwrightCache, dir, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                        path.join(playwrightCache, dir, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                        path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                        path.join(playwrightCache, dir, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                        path.join(playwrightCache, dir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                    ];
+                    const found = cachePaths.find(p => fs.existsSync(p));
+                    if (found) {
+                        console.log('[VioryScraper] Using Playwright cache Chromium:', found);
+                        return found;
+                    }
+                }
+            }
+        } catch (e) { /* ignore */ }
+    }
+
     return undefined; // Use default Playwright browser
 }
 

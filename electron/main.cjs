@@ -798,23 +798,60 @@ async function checkVioryLoginAtStartup() {
             if (process.platform === 'win32') {
                 chromiumPath = path.join(resourceBase, 'chrome-win64', 'chrome.exe');
             } else if (process.platform === 'darwin') {
-                chromiumPath = path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
-                // Alternative path structure
-                if (!fs.existsSync(chromiumPath)) {
-                    chromiumPath = path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
-                }
-                if (!fs.existsSync(chromiumPath)) {
-                    chromiumPath = path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
-                }
+                // Try multiple macOS path patterns (Playwright v1.57+ uses "Google Chrome for Testing")
+                const macPaths = [
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                    path.join(resourceBase, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    path.join(resourceBase, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                    path.join(resourceBase, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                ];
+                chromiumPath = macPaths.find(p => fs.existsSync(p));
             } else {
                 chromiumPath = path.join(resourceBase, 'chrome-linux', 'chrome');
             }
             
-            if (fs.existsSync(chromiumPath)) {
+            if (chromiumPath && fs.existsSync(chromiumPath)) {
                 executablePath = chromiumPath;
                 console.log('[VioryLogin] Using bundled Chromium:', chromiumPath);
+            } else {
+                console.log('[VioryLogin] Bundled Chromium not found, listing resource contents...');
+                try {
+                    if (fs.existsSync(resourceBase)) {
+                        const entries = fs.readdirSync(resourceBase, { recursive: true }).slice(0, 30);
+                        console.log('[VioryLogin] Resource contents:', entries);
+                    }
+                } catch (listErr) { /* ignore */ }
             }
         } catch (e) { /* Use system chromium */ }
+
+        // On macOS, also try Playwright's default cache location
+        if (!executablePath && process.platform === 'darwin') {
+            try {
+                const homeDir = process.env.HOME || '';
+                const playwrightCache = path.join(homeDir, 'Library', 'Caches', 'ms-playwright');
+                if (fs.existsSync(playwrightCache)) {
+                    const chromiumDirs = fs.readdirSync(playwrightCache).filter(d => d.startsWith('chromium-')).sort().reverse();
+                    for (const dir of chromiumDirs) {
+                        const cachePaths = [
+                            path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                            path.join(playwrightCache, dir, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                            path.join(playwrightCache, dir, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+                            path.join(playwrightCache, dir, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                            path.join(playwrightCache, dir, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+                            path.join(playwrightCache, dir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
+                        ];
+                        const found = cachePaths.find(p => fs.existsSync(p));
+                        if (found) {
+                            executablePath = found;
+                            console.log('[VioryLogin] Using Playwright cache Chromium:', found);
+                            break;
+                        }
+                    }
+                }
+            } catch (e) { console.log('[VioryLogin] Cache search failed:', e.message); }
+        }
 
         // Launch VISIBLE browser for login
         const { chromium } = require('playwright');
@@ -908,8 +945,46 @@ async function checkVioryLoginAtStartup() {
     } catch (error) {
         console.error('[VioryLogin] Error:', error.message);
         await closeVioryLoginBrowser();
-        if (mainWindow) {
-            mainWindow.webContents.send('viory-status-update', { status: 'error', message: error.message });
+
+        // Handle missing Chromium browser specifically
+        if (error.message && error.message.includes('Executable doesn\'t exist')) {
+            console.log('[VioryLogin] Chromium browser not found - attempting auto-install...');
+            
+            // Try to auto-install Playwright browsers
+            try {
+                const { execSync } = require('child_process');
+                console.log('[VioryLogin] Running: npx playwright install chromium');
+                execSync('npx playwright install chromium', { 
+                    stdio: 'inherit',
+                    timeout: 120000,
+                    env: { ...process.env }
+                });
+                console.log('[VioryLogin] Playwright Chromium installed successfully! Retrying login check...');
+                
+                if (mainWindow) {
+                    mainWindow.webContents.send('viory-status-update', { 
+                        status: 'installing', 
+                        message: 'Browser installed. Retrying...' 
+                    });
+                }
+                
+                // Retry the login check after installation
+                isCheckingVioryLogin = false;
+                setTimeout(() => checkVioryLoginAtStartup(), 2000);
+                return;
+            } catch (installError) {
+                console.error('[VioryLogin] Auto-install failed:', installError.message);
+                if (mainWindow) {
+                    mainWindow.webContents.send('viory-status-update', { 
+                        status: 'error', 
+                        message: 'Chromium browser not found. Please run: npx playwright install chromium' 
+                    });
+                }
+            }
+        } else {
+            if (mainWindow) {
+                mainWindow.webContents.send('viory-status-update', { status: 'error', message: error.message });
+            }
         }
     } finally {
         isCheckingVioryLogin = false;
