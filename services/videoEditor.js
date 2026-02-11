@@ -591,6 +591,31 @@ class VideoEditorEngine {
     }
 
     /**
+     * Get hardware-accelerated decoding input options
+     * These go BEFORE the -i input flag for FFmpeg
+     * Returns array of input options or empty array if no hwaccel available
+     */
+    getHwaccelInputOptions() {
+        if (!this.detectedGPU || this.detectedGPU.type === 'CPU') return [];
+
+        const options = [];
+        if (this.detectedGPU.type === 'NVIDIA') {
+            options.push('-hwaccel', 'cuda');
+            options.push('-hwaccel_output_format', 'cuda');
+        } else if (this.detectedGPU.type === 'Apple') {
+            options.push('-hwaccel', 'videotoolbox');
+        } else if (this.detectedGPU.type === 'Intel') {
+            options.push('-hwaccel', 'qsv');
+        }
+        // AMD AMF: -hwaccel d3d11va on Windows
+        else if (this.detectedGPU.type === 'AMD' && process.platform === 'win32') {
+            options.push('-hwaccel', 'd3d11va');
+        }
+
+        return options;
+    }
+
+    /**
      * Get encoder-specific options for optimal quality/speed
      */
     getEncoderOptions(encoder, preset = 'fast') {
@@ -598,13 +623,17 @@ class VideoEditorEngine {
 
         if (encoder.includes('nvenc')) {
             // NVIDIA NVENC optimized settings
-            // OPTIMIZED: p2 is faster than p4 with minimal quality loss
             options.push('-rc', 'vbr');
             options.push('-preset', preset === 'fast' ? 'p2' : 'p4');
             options.push('-tune', 'hq');
             options.push('-rc-lookahead', '15');
             options.push('-spatial-aq', '1');
             options.push('-temporal-aq', '1');
+        } else if (encoder.includes('videotoolbox')) {
+            // Apple VideoToolbox optimized settings
+            // VT uses a quality scale, not presets like x264
+            options.push('-realtime', preset === 'fast' ? '1' : '0');
+            options.push('-allow_sw', '0');  // Force hardware encoding only
         } else if (encoder.includes('qsv')) {
             // Intel Quick Sync settings
             options.push('-preset', preset === 'fast' ? 'faster' : 'medium');
@@ -834,6 +863,16 @@ class VideoEditorEngine {
             this.getMediaDuration(inputPath).then(inputDuration => {
                 let command = ffmpeg(inputPath);
                 const targetDuration = options.duration;
+
+                // Add hardware-accelerated decoding (before input processing)
+                const hwaccelOpts = this.getHwaccelInputOptions();
+                if (hwaccelOpts.length > 0) {
+                    // hwaccel options must be input options (before -i)
+                    for (let i = 0; i < hwaccelOpts.length; i += 2) {
+                        command.inputOption(hwaccelOpts[i], hwaccelOpts[i + 1]);
+                    }
+                    editorLog(`[Clip] Using HW-accelerated decoding: ${hwaccelOpts.join(' ')}`);
+                }
 
                 // If input is shorter than target, we need to loop
                 // FIX: Calculate exact number of loops needed instead of infinite loop
@@ -1904,7 +1943,7 @@ class VideoEditorEngine {
                 outputOptions.push('-maxrate', videoBitrate);
                 outputOptions.push('-bufsize', bufferSize);
             } else {
-                // Hardware Encoding (NVENC/QSV/AMF) - use bitrate mode
+                // Hardware Encoding (NVENC/QSV/AMF/VideoToolbox) - use bitrate mode
                 outputOptions.push('-b:v', videoBitrate);
                 outputOptions.push('-maxrate', videoBitrate);
                 outputOptions.push('-bufsize', bufferSize);
@@ -1912,17 +1951,22 @@ class VideoEditorEngine {
                 if (vCodec.includes('nvenc')) {
                     // NVIDIA NVENC optimized settings
                     outputOptions.push('-rc', 'vbr');
-                    outputOptions.push('-preset', 'p5');  // Faster than p4, same quality with VBR
-                    outputOptions.push('-tune', 'hq');    // High quality tuning
-                    outputOptions.push('-rc-lookahead', '20'); // Lookahead for better quality
+                    outputOptions.push('-preset', 'p5');
+                    outputOptions.push('-tune', 'hq');
+                    outputOptions.push('-rc-lookahead', '20');
+                } else if (vCodec.includes('videotoolbox')) {
+                    // Apple VideoToolbox optimized settings
+                    outputOptions.push('-realtime', '0');      // Prioritize quality over realtime
+                    outputOptions.push('-allow_sw', '0');      // Force hardware encoding
+                    editorLog(`[Export] Using Apple VideoToolbox HW encoder`);
                 } else if (vCodec.includes('qsv')) {
                     // Intel Quick Sync optimized settings
                     outputOptions.push('-preset', 'medium');
-                    outputOptions.push('-async_depth', '4'); // Async encoding for better throughput
+                    outputOptions.push('-async_depth', '4');
                 } else if (vCodec.includes('amf')) {
                     // AMD AMF optimized settings
                     outputOptions.push('-quality', 'balanced');
-                    outputOptions.push('-rc', 'vbr_latency'); // VBR with low latency
+                    outputOptions.push('-rc', 'vbr_latency');
                 }
             }
 

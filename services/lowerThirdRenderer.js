@@ -152,6 +152,7 @@ async function detectGPU() {
         hasNvidia: false,
         hasAmd: false,
         hasIntel: false,
+        hasAppleSilicon: false,
         vram: 0,
         gpuName: 'Unknown',
         recommended: 'cpu',
@@ -174,7 +175,7 @@ async function detectGPU() {
                 gpuInfo.vram = parseInt(vram) || 0;
                 gpuInfo.recommended = 'gpu';
                 gpuInfo.gl = 'angle';
-                gpuInfo.concurrency = gpuInfo.vram >= 8000 ? 4 : gpuInfo.vram >= 4000 ? 2 : 1;
+                gpuInfo.concurrency = gpuInfo.vram >= 8000 ? 4 : gpuInfo.vram >= 4000 ? 3 : 2;
                 logInfo(`[LowerThird] Detected NVIDIA GPU: ${name} (${gpuInfo.vram}MB VRAM) - Using GPU acceleration`);
             }
         } catch (e) {
@@ -217,7 +218,7 @@ async function detectGPU() {
                 }
 
                 if (gpuInfo.recommended === 'gpu') {
-                    gpuInfo.concurrency = gpuInfo.vram >= 8000 ? 4 : gpuInfo.vram >= 4000 ? 2 : 1;
+                    gpuInfo.concurrency = gpuInfo.vram >= 8000 ? 4 : gpuInfo.vram >= 4000 ? 3 : 2;
                     logInfo(`[LowerThird] Detected GPU: ${gpuInfo.gpuName} (${gpuInfo.vram}MB) - Using GPU acceleration`);
                 }
             } catch (e) {
@@ -230,11 +231,13 @@ async function detectGPU() {
             try {
                 const { stdout } = await execAsync('system_profiler SPDisplaysDataType', { timeout: 5000 });
                 if (stdout.toLowerCase().includes('apple m')) {
+                    gpuInfo.hasAppleSilicon = true;
                     gpuInfo.gpuName = 'Apple Silicon';
                     gpuInfo.recommended = 'gpu';
                     gpuInfo.gl = 'angle';
-                    gpuInfo.concurrency = 2;
-                    logInfo(`[LowerThird] Detected Apple Silicon - Using GPU acceleration`);
+                    // Apple Silicon has unified memory with high bandwidth - can handle more concurrency
+                    gpuInfo.concurrency = 3;
+                    logInfo(`[LowerThird] Detected Apple Silicon - Using GPU acceleration (concurrency: 3)`);
                 }
             } catch (e) {
                 // Fall back to CPU

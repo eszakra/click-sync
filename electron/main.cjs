@@ -612,7 +612,11 @@ function createWindow() {
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
-            preload: path.join(__dirname, 'preload.cjs')
+            preload: path.join(__dirname, 'preload.cjs'),
+            // GPU acceleration for canvas/waveform/timeline rendering
+            webgl: true,
+            enableWebSQL: false,
+            spellcheck: false
         },
         // Modern frameless look - on macOS keep frame for traffic light buttons
         frame: process.platform === 'darwin' ? true : false,
@@ -1126,6 +1130,23 @@ async function closeVioryLoginBrowser() {
         console.warn('[VioryLogin] Error closing browser:', e.message);
     }
 }
+
+// ============ GPU ACCELERATION FLAGS ============
+// Enable GPU acceleration for faster UI rendering and smoother animations
+// These must be set BEFORE app.whenReady()
+if (process.platform === 'darwin') {
+    // macOS: Enable Metal backend for Apple Silicon GPU acceleration
+    app.commandLine.appendSwitch('enable-gpu-rasterization');
+    app.commandLine.appendSwitch('enable-zero-copy');
+    app.commandLine.appendSwitch('ignore-gpu-blocklist');
+} else if (process.platform === 'win32') {
+    // Windows: Enable D3D11 and GPU rasterization
+    app.commandLine.appendSwitch('enable-gpu-rasterization');
+    app.commandLine.appendSwitch('enable-zero-copy');
+    app.commandLine.appendSwitch('ignore-gpu-blocklist');
+}
+// Use all available threads for media processing
+app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer,V8VmFuture');
 
 // This method will be called when Electron has finished initialization
 app.whenReady().then(async () => {

@@ -48,6 +48,142 @@ let renderMedia = null;
 let selectComposition = null;
 let remotionLoaded = false;
 
+// GPU detection cache (shared pattern with lowerThirdRenderer)
+let gpuInfo = null;
+
+/**
+ * Detect available GPU and its capabilities for Remotion chromiumOptions
+ * Returns: { hasNvidia, hasAmd, hasIntel, vram, recommended: 'gpu' | 'cpu', gl, concurrency }
+ */
+async function detectGPU() {
+    if (gpuInfo) return gpuInfo;
+
+    gpuInfo = {
+        hasNvidia: false,
+        hasAmd: false,
+        hasIntel: false,
+        hasAppleSilicon: false,
+        vram: 0,
+        gpuName: 'Unknown',
+        recommended: 'cpu',
+        concurrency: 1,
+        gl: 'swiftshader'
+    };
+
+    try {
+        const { exec } = await import('child_process');
+        const { promisify } = await import('util');
+        const execAsync = promisify(exec);
+
+        // Try nvidia-smi first (NVIDIA GPUs)
+        try {
+            const { stdout } = await execAsync('nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits', { timeout: 5000 });
+            if (stdout && stdout.trim()) {
+                const [name, vram] = stdout.trim().split(',').map(s => s.trim());
+                gpuInfo.hasNvidia = true;
+                gpuInfo.gpuName = name;
+                gpuInfo.vram = parseInt(vram) || 0;
+                gpuInfo.recommended = 'gpu';
+                gpuInfo.gl = 'angle';
+                gpuInfo.concurrency = gpuInfo.vram >= 8000 ? 4 : gpuInfo.vram >= 4000 ? 3 : 2;
+                logInfo(`[MandatoryCredit] Detected NVIDIA GPU: ${name} (${gpuInfo.vram}MB VRAM)`);
+            }
+        } catch (e) { /* No NVIDIA */ }
+
+        // Windows fallback: wmic
+        if (!gpuInfo.hasNvidia && process.platform === 'win32') {
+            try {
+                const { stdout } = await execAsync('wmic path win32_videocontroller get name,adapterram /format:csv', { timeout: 5000 });
+                const lines = stdout.trim().split('\n').filter(l => l.trim() && !l.includes('Node'));
+                for (const line of lines) {
+                    const parts = line.split(',');
+                    if (parts.length >= 3) {
+                        const name = parts[1] || '';
+                        const ram = parseInt(parts[2]) || 0;
+                        const vramMB = Math.round(ram / 1024 / 1024);
+
+                        if (name.toLowerCase().includes('nvidia')) {
+                            gpuInfo.hasNvidia = true;
+                            gpuInfo.recommended = 'gpu';
+                            gpuInfo.gl = 'angle';
+                        } else if (name.toLowerCase().includes('amd') || name.toLowerCase().includes('radeon')) {
+                            gpuInfo.hasAmd = true;
+                            gpuInfo.recommended = 'gpu';
+                            gpuInfo.gl = 'angle';
+                        } else if (name.toLowerCase().includes('intel')) {
+                            gpuInfo.hasIntel = true;
+                            if (!gpuInfo.hasNvidia && !gpuInfo.hasAmd) {
+                                gpuInfo.recommended = 'cpu';
+                                gpuInfo.gl = 'swiftshader';
+                            }
+                        }
+
+                        if (vramMB > gpuInfo.vram) {
+                            gpuInfo.vram = vramMB;
+                            gpuInfo.gpuName = name;
+                        }
+                    }
+                }
+                if (gpuInfo.recommended === 'gpu') {
+                    gpuInfo.concurrency = gpuInfo.vram >= 8000 ? 4 : gpuInfo.vram >= 4000 ? 3 : 2;
+                }
+            } catch (e) { /* wmic failed */ }
+        }
+
+        // macOS: Apple Silicon detection
+        if (!gpuInfo.hasNvidia && !gpuInfo.hasAmd && process.platform === 'darwin') {
+            try {
+                const { stdout } = await execAsync('system_profiler SPDisplaysDataType', { timeout: 5000 });
+                if (stdout.toLowerCase().includes('apple m')) {
+                    gpuInfo.hasAppleSilicon = true;
+                    gpuInfo.gpuName = 'Apple Silicon';
+                    gpuInfo.recommended = 'gpu';
+                    gpuInfo.gl = 'angle';
+                    // Apple Silicon has unified memory - can handle higher concurrency
+                    gpuInfo.concurrency = 3;
+                    logInfo(`[MandatoryCredit] Detected Apple Silicon - GPU acceleration enabled`);
+                }
+            } catch (e) { /* Fall back to CPU */ }
+        }
+
+        if (gpuInfo.recommended === 'cpu') {
+            logInfo(`[MandatoryCredit] No dedicated GPU detected - Using CPU rendering`);
+        }
+    } catch (e) {
+        logError(`[MandatoryCredit] GPU detection failed: ${e.message}`);
+    }
+
+    return gpuInfo;
+}
+
+// ============ OVERLAY CACHE SYSTEM ============
+const overlayCache = new Map();
+const pendingRenders = new Map();
+
+function generateCacheKey(text, durationInSeconds) {
+    const content = `mc_${text || ''}|${durationInSeconds}`;
+    let hash = 0;
+    for (let i = 0; i < content.length; i++) {
+        const char = content.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+    }
+    return `mc_${Math.abs(hash).toString(36)}`;
+}
+
+function getCachedOverlay(cacheKey) {
+    const cached = overlayCache.get(cacheKey);
+    if (cached && cached.path && fs.existsSync(cached.path)) {
+        logInfo(`[MandatoryCredit] Cache HIT: ${cacheKey}`);
+        return cached.path;
+    }
+    return null;
+}
+
+function setCachedOverlay(cacheKey, filePath) {
+    overlayCache.set(cacheKey, { path: filePath, timestamp: Date.now() });
+}
+
 async function loadRemotion() {
     if (remotionLoaded) return true;
     try {
@@ -57,6 +193,10 @@ async function loadRemotion() {
         selectComposition = renderer.selectComposition;
         remotionLoaded = true;
         logInfo('[MandatoryCredit] @remotion/renderer loaded successfully');
+
+        // Detect GPU on first load
+        await detectGPU();
+
         return true;
     } catch (e) {
         logError(`[MandatoryCredit] Failed to load @remotion/renderer: ${e.message}`);
@@ -183,35 +323,60 @@ class MandatoryCreditRenderer {
     }
 
     /**
-     * Main render function - uses Remotion renderer, falls back to Canvas
+     * Main render function - uses cache, Remotion renderer, falls back to Canvas
      */
     async renderMandatoryCredit({ text, durationInSeconds = 3, segmentId, onProgress = null }) {
         // Initialize paths on first use
         this.initializePaths();
 
-        logInfo(`[MandatoryCredit] ========================================`);
-        logInfo(`[MandatoryCredit] Rendering: "${text}"`);
-        logInfo(`[MandatoryCredit] Duration: ${durationInSeconds}s, Segment: ${segmentId}`);
+        // ============ CHECK CACHE FIRST ============
+        const cacheKey = generateCacheKey(text, durationInSeconds);
 
-        // Try Remotion renderer first
-        if (this.bundlePath && this.binariesDir) {
-            try {
-                const result = await this.renderWithRemotion({ text, durationInSeconds, segmentId, onProgress });
-                if (result && fs.existsSync(result)) {
-                    logInfo(`[MandatoryCredit] ✨ Remotion SUCCESS: ${result}`);
-                    return result;
-                }
-            } catch (e) {
-                logError(`[MandatoryCredit] ❌ Remotion FAILED: ${e.message}`);
-                logError(`[MandatoryCredit] Stack: ${e.stack}`);
-            }
-        } else {
-            logInfo('[MandatoryCredit] Remotion requirements not met, using Canvas fallback');
+        const cachedPath = getCachedOverlay(cacheKey);
+        if (cachedPath) {
+            if (onProgress) onProgress({ percent: 100, text, segmentId, type: 'mandatory_credit' });
+            return cachedPath;
         }
 
-        // Fallback to Canvas (static PNG)
-        logInfo('[MandatoryCredit] Using Canvas fallback (static PNG)...');
-        return this.renderWithCanvas({ text, segmentId });
+        // Check if already being rendered (avoid duplicate work)
+        if (pendingRenders.has(cacheKey)) {
+            logInfo(`[MandatoryCredit] seg=${segmentId}: Waiting for pending render`);
+            return pendingRenders.get(cacheKey);
+        }
+
+        logInfo(`[MandatoryCredit] seg=${segmentId}: Rendering "${(text || '').substring(0, 30)}..."`);
+
+        const renderPromise = (async () => {
+            try {
+                // Try Remotion renderer first
+                if (this.bundlePath && this.binariesDir) {
+                    try {
+                        const result = await this.renderWithRemotion({ text, durationInSeconds, segmentId, onProgress });
+                        if (result && fs.existsSync(result)) {
+                            setCachedOverlay(cacheKey, result);
+                            if (onProgress) onProgress({ percent: 100, text, segmentId, type: 'mandatory_credit' });
+                            return result;
+                        }
+                    } catch (e) {
+                        logError(`[MandatoryCredit] Remotion FAILED: ${e.message}`);
+                    }
+                }
+
+                // Fallback to Canvas (static PNG)
+                logInfo('[MandatoryCredit] Using Canvas fallback (static PNG)...');
+                const canvasResult = await this.renderWithCanvas({ text, segmentId });
+                if (canvasResult) {
+                    setCachedOverlay(cacheKey, canvasResult);
+                    if (onProgress) onProgress({ percent: 100, text, segmentId, type: 'mandatory_credit' });
+                }
+                return canvasResult;
+            } finally {
+                pendingRenders.delete(cacheKey);
+            }
+        })();
+
+        pendingRenders.set(cacheKey, renderPromise);
+        return renderPromise;
     }
 
     /**
@@ -264,10 +429,13 @@ class MandatoryCreditRenderer {
 
             logInfo('[MandatoryCredit] Starting render...');
 
-            // OPTIMIZED: Use more CPU cores
+            // Get GPU configuration (auto-detected and cached)
+            const gpu = await detectGPU();
+
+            // OPTIMIZED: Use GPU concurrency + CPU cores for maximum throughput
             const cpuCount = os.cpus().length;
-            const optimizedConcurrency = Math.min(cpuCount, 8);
-            logInfo(`[MandatoryCredit] Using concurrency: ${optimizedConcurrency} (CPU cores: ${cpuCount})`);
+            const optimizedConcurrency = Math.max(gpu.concurrency, Math.min(cpuCount, 8));
+            logInfo(`[MandatoryCredit] Using concurrency: ${optimizedConcurrency} (CPU: ${cpuCount}, GPU: ${gpu.gpuName})`);
 
             const renderOptions = {
                 composition: {
@@ -285,10 +453,17 @@ class MandatoryCreditRenderer {
                 timeoutInMilliseconds: 120000,
                 verbose: false,
                 concurrency: optimizedConcurrency,
+                jpegQuality: 85,
+                chromiumOptions: {
+                    disableWebSecurity: true,
+                    headless: true,
+                    gl: gpu.gl,
+                    enableGPU: gpu.recommended === 'gpu',
+                },
                 onProgress: ({ progress }) => {
                     const pct = Math.round(progress * 100);
-                    if (pct % 25 === 0) {
-                        logInfo(`[MandatoryCredit] Render progress: ${pct}%`);
+                    if (pct === 50 || pct >= 99) {
+                        logInfo(`[MandatoryCredit] seg=${segmentId}: ${pct}%`);
                     }
                     if (onProgress) {
                         onProgress({ percent: pct, text, segmentId, type: 'mandatory_credit' });
@@ -387,6 +562,9 @@ class MandatoryCreditRenderer {
                     fs.unlinkSync(path.join(this.outputDir, file));
                 }
             }
+            overlayCache.clear();
+            pendingRenders.clear();
+            logInfo('[MandatoryCredit] Cache cleared');
         } catch (e) {
             logError(`[MandatoryCredit] Cleanup failed: ${e.message}`);
         }
@@ -400,6 +578,18 @@ class MandatoryCreditRenderer {
         if (!text || !text.trim()) {
             return null;
         }
+
+        const cacheKey = generateCacheKey(text, durationInSeconds);
+        const cached = getCachedOverlay(cacheKey);
+        if (cached) {
+            logInfo(`[MandatoryCredit] Pre-render: Already cached ${cacheKey}`);
+            return cached;
+        }
+
+        if (pendingRenders.has(cacheKey)) {
+            logInfo(`[MandatoryCredit] Pre-render: Already in progress ${cacheKey}`);
+            return pendingRenders.get(cacheKey);
+        }
         
         logInfo(`[MandatoryCredit] Pre-render: Starting for "${text.substring(0, 30)}..."`);
         
@@ -412,20 +602,22 @@ class MandatoryCreditRenderer {
     }
     
     /**
-     * Check if a credit is cached (stub - no cache in this version)
+     * Check if a credit is cached
      */
     isCached(text, durationInSeconds = 3) {
-        return false;
+        if (!text) return false;
+        const cacheKey = generateCacheKey(text, durationInSeconds);
+        return getCachedOverlay(cacheKey) !== null;
     }
     
     /**
-     * Get cache statistics (stub for compatibility with main.cjs)
+     * Get cache statistics
      */
     getCacheStats() {
         return {
-            cached: 0,
-            pending: 0,
-            items: []
+            cached: overlayCache.size,
+            pending: pendingRenders.size,
+            items: Array.from(overlayCache.keys())
         };
     }
 }

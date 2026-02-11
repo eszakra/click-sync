@@ -31,19 +31,60 @@ function logError(msg, error = null) {
     } catch (e) {}
 }
 
+// Cache detected encoder and GPU type to avoid repeated ffmpeg calls
+let cachedEncoder = null;
+let cachedGPUType = null;
+
 /**
- * Get hardware encoder
+ * Get hardware encoder (cached)
  */
 function getHardwareEncoder() {
+    if (cachedEncoder) return cachedEncoder;
     try {
-        // Check for NVIDIA
         const result = execSync('ffmpeg -encoders 2>&1', { encoding: 'utf8' });
-        if (result.includes('h264_nvenc')) return 'h264_nvenc';
-        if (result.includes('h264_videotoolbox')) return 'h264_videotoolbox';
-        if (result.includes('h264_qsv')) return 'h264_qsv';
-        if (result.includes('h264_amf')) return 'h264_amf';
-    } catch (e) {}
-    return 'libx264'; // Software fallback
+        if (result.includes('h264_nvenc')) { cachedGPUType = 'NVIDIA'; cachedEncoder = 'h264_nvenc'; }
+        else if (result.includes('h264_videotoolbox')) { cachedGPUType = 'Apple'; cachedEncoder = 'h264_videotoolbox'; }
+        else if (result.includes('h264_qsv')) { cachedGPUType = 'Intel'; cachedEncoder = 'h264_qsv'; }
+        else if (result.includes('h264_amf')) { cachedGPUType = 'AMD'; cachedEncoder = 'h264_amf'; }
+        else { cachedGPUType = 'CPU'; cachedEncoder = 'libx264'; }
+    } catch (e) {
+        cachedGPUType = 'CPU';
+        cachedEncoder = 'libx264';
+    }
+    logInfo(`Detected GPU: ${cachedGPUType}, Encoder: ${cachedEncoder}`);
+    return cachedEncoder;
+}
+
+/**
+ * Get hwaccel input options for hardware-accelerated decoding
+ */
+function getHwaccelInputOptions() {
+    if (!cachedGPUType) getHardwareEncoder(); // ensure detection ran
+    
+    if (cachedGPUType === 'NVIDIA') return ['-hwaccel', 'cuda'];
+    if (cachedGPUType === 'Apple') return ['-hwaccel', 'videotoolbox'];
+    if (cachedGPUType === 'Intel') return ['-hwaccel', 'qsv'];
+    if (cachedGPUType === 'AMD' && process.platform === 'win32') return ['-hwaccel', 'd3d11va'];
+    return [];
+}
+
+/**
+ * Get encoder-specific output options
+ */
+function getEncoderOutputOptions(encoder) {
+    const opts = [];
+    if (encoder.includes('nvenc')) {
+        opts.push('-rc', 'vbr', '-cq', '23', '-preset', 'p2');
+    } else if (encoder.includes('videotoolbox')) {
+        opts.push('-realtime', '1', '-allow_sw', '0');
+    } else if (encoder.includes('qsv')) {
+        opts.push('-preset', 'faster', '-async_depth', '4');
+    } else if (encoder.includes('amf')) {
+        opts.push('-quality', 'speed', '-rc', 'vbr_latency');
+    } else {
+        opts.push('-preset', 'fast', '-crf', '23');
+    }
+    return opts;
 }
 
 /**
@@ -103,8 +144,17 @@ export async function renderSegmentVideo({
             return;
         }
 
-        // Build ffmpeg command
+        // Build ffmpeg command with hardware-accelerated decoding
         let command = ffmpeg(videoFilePath);
+        
+        // Add hwaccel input options for faster decoding
+        const hwaccelOpts = getHwaccelInputOptions();
+        if (hwaccelOpts.length > 0) {
+            for (let i = 0; i < hwaccelOpts.length; i += 2) {
+                command.inputOption(hwaccelOpts[i], hwaccelOpts[i + 1]);
+            }
+            logInfo(`Using HW-accelerated decoding: ${hwaccelOpts.join(' ')}`);
+        }
 
         // Add overlay inputs if they exist
         const overlayInputs = [];
@@ -164,19 +214,17 @@ export async function renderSegmentVideo({
             command = command.complexFilter(filterComplex, currentInput);
         }
 
-        // Set output options
+        // Set output options with encoder-specific optimization
+        const encoderOpts = getEncoderOutputOptions(encoder);
         const outputOptions = [
             '-c:v', encoder,
-            '-preset', 'fast',
-            '-crf', '23',
+            ...encoderOpts,
+            '-pix_fmt', 'yuv420p',
             '-c:a', 'copy', // Copy audio as-is
             '-movflags', '+faststart',
+            '-threads', '0',  // Use all CPU threads
             '-t', duration.toString() // Limit to segment duration
         ];
-
-        if (encoder === 'h264_nvenc') {
-            outputOptions.push('-rc', 'vbr', '-cq', '23');
-        }
 
         command
             .outputOptions(outputOptions)
