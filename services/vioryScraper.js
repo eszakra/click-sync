@@ -154,15 +154,6 @@ class VioryScraper {
                 console.log('[VioryScraper] No videos found with initial wait');
             });
 
-            // SPEED: Reduced wait from 2000ms to 300ms (but keeping all content)
-            await page.waitForTimeout(300);
-
-            // SPEED: Keeping 3 scrolls as requested, only reduced wait time
-            for (let i = 0; i < 3; i++) {
-                await page.evaluate(() => window.scrollBy(0, 500));
-                await page.waitForTimeout(100); // Reduced from 500ms to 100ms
-            }
-
             // Extract video data
             const extractedVideos = await page.evaluate(() => {
                 const results = [];
