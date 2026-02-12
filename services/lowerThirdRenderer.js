@@ -43,6 +43,27 @@ function logError(msg) {
     try { fs.appendFileSync(LOG_FILE, logLine); } catch (e) { /* ignore */ }
 }
 
+// =============================================================================
+// FIX: On macOS packaged Electron apps, process.cwd() resolves to '/' (root).
+// Remotion uses process.cwd() to find its cache dir (.remotion), and tries to
+// mkdir '/.remotion' which fails with ENOENT (no write permission to /).
+// Fix: Change cwd to a writable directory before Remotion loads.
+// This is safe because our code uses absolute paths everywhere.
+// =============================================================================
+if (process.platform === 'darwin') {
+    try {
+        const cwd = process.cwd();
+        if (cwd === '/' || cwd === '/private/var') {
+            const writableCwd = path.join(os.homedir(), 'ClickStudio', 'Temp');
+            if (!fs.existsSync(writableCwd)) fs.mkdirSync(writableCwd, { recursive: true });
+            process.chdir(writableCwd);
+            logInfo(`[LowerThird] Fixed cwd: '${cwd}' -> '${writableCwd}'`);
+        }
+    } catch (e) {
+        logError(`[LowerThird] Could not fix cwd: ${e.message}`);
+    }
+}
+
 // Lazy load Remotion renderer
 let renderMedia = null;
 let selectComposition = null;
