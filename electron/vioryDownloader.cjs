@@ -1383,14 +1383,6 @@ Answer with JSON only:
                         return { query, queryIndex, results: [], error: 'no_results' };
                     }
 
-                    await pageInstance.waitForTimeout(300);
-
-                    // Scroll down to trigger lazy-loading of additional results
-                    for (let scrolli = 0; scrolli < 3; scrolli++) {
-                        await pageInstance.evaluate(() => window.scrollBy(0, 600));
-                        await pageInstance.waitForTimeout(250);
-                    }
-
                     // Get results with titles AND thumbnail URLs
                     const searchResults = await pageInstance.evaluate(() => {
                         const videos = [];
